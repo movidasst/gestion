@@ -39,7 +39,7 @@ const CONTACTO_VERIFICACION_TELEFONO_VISIBLE =
   '+56 9 6861 5650';
 
 const LOGO_URL =
-  'https://assets.poap.xyz/ff0a7e68-7080-4798-af10-4a481f762e71.jpeg';
+  'https://raw.githubusercontent.com/movidasst/gestion/main/assets/logo-movida-sst-plus.png';
 
 /**
  * Carpeta de Google Drive donde se guardarán las fotografías.
