@@ -78,7 +78,7 @@
 
       <section id="communicationsModule" hidden>
         <div class="hero"><div><div class="eyebrow">Comunicación segmentada</div><h2>Centro de correos</h2><p>Crea mensajes personalizados y envíalos por país, estado, género o situación laboral.</p></div><button id="reloadCampaignsBtn" class="btn btn-secondary"><i class="fa-solid fa-rotate"></i> Actualizar</button></div>
-        <div id="engineWarning" class="engine-warning"><i class="fa-solid fa-shield-halved"></i><div><b>Protección activa:</b> puedes preparar campañas, pero el botón de envío permanecerá bloqueado hasta publicar el Apps Script actualizado. Así no se pierden mensajes ni se afecta el correo de registro.</div></div>
+        <div id="engineWarning" class="engine-warning" hidden><i class="fa-solid fa-shield-halved"></i><div><b>Protección activa:</b> el envío permanecerá bloqueado hasta publicar el Apps Script actualizado.</div></div>
         <section class="stats">
           <article class="stat"><div class="stat-icon"><i class="fa-solid fa-file-lines"></i></div><div><b id="commTemplates">—</b><small>Plantillas</small></div></article>
           <article class="stat"><div class="stat-icon"><i class="fa-solid fa-bullhorn"></i></div><div><b id="commCampaigns">—</b><small>Campañas</small></div></article>
@@ -114,7 +114,7 @@
     const SUPABASE_KEY='sb_publishable_bRnkA6PA8-v073nrw9zxiQ_8rVGiOn1';
     const sb=window.supabase.createClient(SUPABASE_URL,SUPABASE_KEY);
     const $=id=>document.getElementById(id);
-    const CAMPAIGN_ENGINE_READY=false;
+    const CAMPAIGN_ENGINE_READY=true;
     const state={members:[],total:0,page:0,limit:25,current:null,catalogs:{paises:[],estados:[],generos:[],laborales:[]},searchTimer:null,comm:{summary:{},templates:[],campaigns:[],preview:null}};
     const safe=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
     const val=v=>v==null?'':String(v);
