@@ -1,0 +1,2 @@
+[functions.moodle-admin]
+verify_jwt = true
