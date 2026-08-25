@@ -3,6 +3,34 @@ import { createClient } from "npm:@supabase/supabase-js@2.95.0";
 
 type JsonObject = Record<string, unknown>;
 type MoodleParameter = string | number | boolean;
+type SupabaseAdminClient = ReturnType<typeof createClient>;
+
+type PaymentFile = {
+  filename: string;
+  mimetype: string;
+  filesize: number;
+  fileurl: string;
+};
+
+type PaymentRow = {
+  submission_id: number;
+  moodle_user_id: number;
+  attemptnumber: number;
+  timecreated: number;
+  timemodified: number;
+  submission_status: string;
+  gradingstatus: string;
+  processed: boolean;
+  student: JsonObject;
+  member: JsonObject | null;
+  files: PaymentFile[];
+};
+
+type PaymentSnapshot = {
+  course: JsonObject;
+  assignment: JsonObject;
+  rows: PaymentRow[];
+};
 
 const ALLOWED_ORIGINS = new Set([
   "https://gestion.movidasst.com",
@@ -11,6 +39,11 @@ const ALLOWED_ORIGINS = new Set([
 
 const STUDENT_ROLE_ID = 5;
 const JSON_CONTENT_TYPE = "application/json; charset=utf-8";
+const PAYMENT_COURSE_ID = 138;
+const PAYMENT_ASSIGNMENT_CM_ID = 933;
+const PAYMENT_ASSIGNMENT_NAME = "Sube tu pago";
+const PAYMENT_APPROVAL_GRADE = 100;
+const MAX_PAYMENT_FILE_BYTES = 15 * 1024 * 1024;
 
 function getAdminKey(): string {
   const direct = [
@@ -95,6 +128,24 @@ function positiveInteger(value: unknown, label: string): number {
     throw new Error(`${label} no es válido.`);
   }
   return number;
+}
+
+function nonNegativeInteger(value: unknown, label: string): number {
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < 0) {
+    throw new Error(`${label} no es válido.`);
+  }
+  return number;
+}
+
+function asObject(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function asObjects(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value) ? value.map(asObject) : [];
 }
 
 function normalizeSearch(value: unknown): string {
@@ -197,11 +248,178 @@ async function getUserCourses(moodleUserId: number): Promise<JsonObject[]> {
   return (Array.isArray(response) ? response : []).map(normalizeCourse);
 }
 
+function getSubmissionFiles(submission: Record<string, unknown>): PaymentFile[] {
+  const files: PaymentFile[] = [];
+  for (const plugin of asObjects(submission.plugins)) {
+    for (const area of asObjects(plugin.fileareas)) {
+      for (const file of asObjects(area.files)) {
+        const fileurl = String(file.fileurl || "").trim();
+        const filename = String(file.filename || "").trim();
+        if (!fileurl || !filename || file.isdir === true || Number(file.isdir || 0) === 1) continue;
+        files.push({
+          filename,
+          mimetype: String(file.mimetype || "application/octet-stream"),
+          filesize: Math.max(0, Number(file.filesize || 0)),
+          fileurl,
+        });
+      }
+    }
+  }
+  return files;
+}
+
+async function getPaymentAssignment(): Promise<{ course: JsonObject; assignment: JsonObject }> {
+  const response = asObject(await callMoodle("mod_assign_get_assignments", {
+    "courseids[0]": PAYMENT_COURSE_ID,
+    includenotenrolledcourses: 1,
+  }));
+  const course = asObjects(response.courses)
+    .find((item) => Number(item.id || 0) === PAYMENT_COURSE_ID);
+  if (!course) {
+    throw new Error(`Moodle no devolvió el curso piloto #${PAYMENT_COURSE_ID}.`);
+  }
+
+  const assignment = asObjects(course.assignments)
+    .find((item) => Number(item.cmid || 0) === PAYMENT_ASSIGNMENT_CM_ID);
+  if (!assignment) {
+    throw new Error(`No se encontró la tarea “${PAYMENT_ASSIGNMENT_NAME}” (#${PAYMENT_ASSIGNMENT_CM_ID}).`);
+  }
+
+  return {
+    course: {
+      id: Number(course.id || 0),
+      fullname: String(course.fullname || "Curso piloto"),
+      shortname: String(course.shortname || ""),
+    },
+    assignment: {
+      id: Number(assignment.id || 0),
+      cmid: Number(assignment.cmid || 0),
+      name: String(assignment.name || PAYMENT_ASSIGNMENT_NAME),
+      grade: Number(assignment.grade || 0),
+      markingworkflow: Number(assignment.markingworkflow || 0),
+      teamsubmission: Number(assignment.teamsubmission || 0),
+    },
+  };
+}
+
+async function getPaymentSnapshot(admin: SupabaseAdminClient): Promise<PaymentSnapshot> {
+  const context = await getPaymentAssignment();
+  const assignmentId = positiveInteger(context.assignment.id, "La tarea de pago");
+  const [submissionResponse, enrolledResponse] = await Promise.all([
+    callMoodle("mod_assign_get_submissions", {
+      "assignmentids[0]": assignmentId,
+      status: "",
+      since: 0,
+      before: 0,
+    }),
+    callMoodle("core_enrol_get_enrolled_users", { courseid: PAYMENT_COURSE_ID }),
+  ]);
+
+  const assignmentSubmissions = asObjects(asObject(submissionResponse).assignments)
+    .find((item) => Number(item.assignmentid || 0) === assignmentId);
+  const submissions = asObjects(assignmentSubmissions?.submissions);
+  const users = asObjects(enrolledResponse);
+  const userMap = new Map(users.map((user) => [Number(user.id || 0), user]));
+  const moodleUserIds = [...new Set(submissions.map((item) => Number(item.userid || 0)).filter(Boolean))];
+  let linkedMembers: Record<string, unknown>[] = [];
+
+  if (moodleUserIds.length) {
+    const { data, error } = await admin
+      .from("integrantes")
+      .select("id,nombres,apellidos,documento,cedula,correo,moodle_user_id")
+      .in("moodle_user_id", moodleUserIds);
+    if (error) throw new Error(`No se pudieron relacionar los integrantes: ${error.message}`);
+    linkedMembers = data || [];
+  }
+
+  const memberMap = new Map(linkedMembers.map((member) => [Number(member.moodle_user_id || 0), member]));
+  const rows = submissions
+    .map((submission): PaymentRow | null => {
+      const files = getSubmissionFiles(submission);
+      if (!files.length) return null;
+      const moodleUserId = Number(submission.userid || 0);
+      const user = userMap.get(moodleUserId) || {};
+      const member = memberMap.get(moodleUserId) || null;
+      const gradingstatus = String(submission.gradingstatus || "notgraded").toLowerCase();
+      const fullname = String(
+        user.fullname ||
+          `${String(user.firstname || member?.nombres || "")} ${String(user.lastname || member?.apellidos || "")}`.trim() ||
+          `Usuario Moodle #${moodleUserId}`,
+      );
+      return {
+        submission_id: Number(submission.id || 0),
+        moodle_user_id: moodleUserId,
+        attemptnumber: Number(submission.attemptnumber || 0),
+        timecreated: Number(submission.timecreated || 0),
+        timemodified: Number(submission.timemodified || 0),
+        submission_status: String(submission.status || ""),
+        gradingstatus,
+        processed: gradingstatus === "graded",
+        student: {
+          fullname,
+          email: String(user.email || member?.correo || ""),
+          idnumber: String(user.idnumber || member?.documento || member?.cedula || ""),
+        },
+        member: member
+          ? {
+            id: Number(member.id || 0),
+            documento: String(member.documento || member.cedula || ""),
+          }
+          : null,
+        files,
+      };
+    })
+    .filter((row): row is PaymentRow => row !== null)
+    .sort((left, right) => right.timemodified - left.timemodified);
+
+  return { ...context, rows };
+}
+
+function publicPaymentRow(row: PaymentRow): JsonObject {
+  return {
+    ...row,
+    files: row.files.map((file, index) => ({
+      index,
+      filename: file.filename,
+      mimetype: file.mimetype,
+      filesize: file.filesize,
+    })),
+  };
+}
+
+async function downloadPaymentFile(file: PaymentFile): Promise<{ data: ArrayBuffer; mimetype: string }> {
+  if (file.filesize > MAX_PAYMENT_FILE_BYTES) {
+    throw new Error("El comprobante supera el máximo de 15 MB permitido para la vista previa.");
+  }
+
+  const baseUrl = new URL(requiredSecret("MOODLE_BASE_URL").replace(/\/+$/, ""));
+  const fileUrl = new URL(file.fileurl);
+  if (fileUrl.origin !== baseUrl.origin || !fileUrl.pathname.includes("/webservice/pluginfile.php/")) {
+    throw new Error("La dirección del comprobante no pertenece al Moodle autorizado.");
+  }
+  fileUrl.searchParams.set("token", requiredSecret("MOODLE_TOKEN"));
+
+  const response = await fetch(fileUrl, { signal: AbortSignal.timeout(30000) });
+  if (!response.ok) throw new Error(`No se pudo descargar el comprobante (${response.status}).`);
+  const data = await response.arrayBuffer();
+  if (data.byteLength > MAX_PAYMENT_FILE_BYTES) {
+    throw new Error("El comprobante descargado supera el máximo de 15 MB.");
+  }
+
+  const responseType = response.headers.get("content-type")?.split(";")[0]?.trim() || "";
+  const declaredType = file.mimetype.split(";")[0]?.trim() || "";
+  const candidate = responseType || declaredType;
+  const mimetype = candidate.startsWith("image/") || candidate === "application/pdf"
+    ? candidate
+    : "application/octet-stream";
+  return { data, mimetype };
+}
+
 async function audit(
-  admin: ReturnType<typeof createClient>,
+  admin: SupabaseAdminClient,
   values: {
     admin_user_id: string;
-    accion: "CREAR_VINCULAR_USUARIO" | "MATRICULAR" | "DESMATRICULAR";
+    accion: "CREAR_VINCULAR_USUARIO" | "MATRICULAR" | "DESMATRICULAR" | "APROBAR_PAGO";
     integrante_id?: number | null;
     moodle_user_id?: number | null;
     moodle_course_id?: number | null;
@@ -350,6 +568,113 @@ Deno.serve(async (req: Request) => {
       const result = await callMoodle("core_enrol_get_enrolled_users", { courseid: courseId });
       const users = Array.isArray(result) ? result : [];
       return json(req, { ok: true, users, total: users.length });
+    }
+
+    if (action === "payment_submissions") {
+      const snapshot = await getPaymentSnapshot(admin);
+      const pending = snapshot.rows.filter((row) => !row.processed).length;
+      return json(req, {
+        ok: true,
+        course: snapshot.course,
+        assignment: snapshot.assignment,
+        summary: {
+          total: snapshot.rows.length,
+          pending,
+          processed: snapshot.rows.length - pending,
+        },
+        payments: snapshot.rows.map(publicPaymentRow),
+      });
+    }
+
+    if (action === "payment_file") {
+      const submissionId = positiveInteger(body.submission_id, "La entrega");
+      const fileIndex = nonNegativeInteger(body.file_index, "El archivo");
+      const snapshot = await getPaymentSnapshot(admin);
+      const payment = snapshot.rows.find((row) => row.submission_id === submissionId);
+      if (!payment) throw new Error("La entrega ya no está disponible en la tarea de pago.");
+      const file = payment.files[fileIndex];
+      if (!file) throw new Error("El comprobante solicitado no existe.");
+      const downloaded = await downloadPaymentFile(file);
+      return new Response(downloaded.data, {
+        status: 200,
+        headers: {
+          ...corsHeaders(req),
+          "Content-Type": downloaded.mimetype,
+          "Content-Length": String(downloaded.data.byteLength),
+          "Content-Disposition": `inline; filename*=UTF-8''${encodeURIComponent(file.filename)}`,
+          "Cache-Control": "no-store",
+          "X-Content-Type-Options": "nosniff",
+        },
+      });
+    }
+
+    if (action === "approve_payment") {
+      const submissionId = positiveInteger(body.submission_id, "La entrega");
+      const snapshot = await getPaymentSnapshot(admin);
+      const payment = snapshot.rows.find((row) => row.submission_id === submissionId);
+      if (!payment) throw new Error("La entrega ya no está disponible en la tarea de pago.");
+      if (payment.processed) {
+        return json(req, { ok: true, already_processed: true, payment: publicPaymentRow(payment) });
+      }
+
+      const assignmentId = positiveInteger(snapshot.assignment.id, "La tarea de pago");
+      const configuredGrade = Number(snapshot.assignment.grade || 0);
+      if (configuredGrade !== PAYMENT_APPROVAL_GRADE) {
+        throw new Error(`La tarea debe estar configurada sobre ${PAYMENT_APPROVAL_GRADE} puntos antes de aprobar pagos.`);
+      }
+
+      const integranteId = Number(payment.member?.id || 0) || null;
+      try {
+        await callMoodle("mod_assign_save_grade", {
+          assignmentid: assignmentId,
+          userid: payment.moodle_user_id,
+          grade: PAYMENT_APPROVAL_GRADE,
+          attemptnumber: payment.attemptnumber,
+          addattempt: 0,
+          workflowstate: Number(snapshot.assignment.markingworkflow || 0) === 1 ? "released" : "",
+          applytoall: 0,
+        });
+        await audit(admin, {
+          admin_user_id: adminUserId,
+          accion: "APROBAR_PAGO",
+          integrante_id: integranteId,
+          moodle_user_id: payment.moodle_user_id,
+          moodle_course_id: PAYMENT_COURSE_ID,
+          detalle: {
+            assignment_id: assignmentId,
+            assignment_cmid: PAYMENT_ASSIGNMENT_CM_ID,
+            assignment_name: String(snapshot.assignment.name || PAYMENT_ASSIGNMENT_NAME),
+            submission_id: payment.submission_id,
+            attemptnumber: payment.attemptnumber,
+            grade: PAYMENT_APPROVAL_GRADE,
+            files: payment.files.map((file) => file.filename),
+          },
+          resultado: "OK",
+        });
+        return json(req, {
+          ok: true,
+          approved: true,
+          moodle_user_id: payment.moodle_user_id,
+          grade: PAYMENT_APPROVAL_GRADE,
+        });
+      } catch (error) {
+        const message = cleanError(error);
+        await audit(admin, {
+          admin_user_id: adminUserId,
+          accion: "APROBAR_PAGO",
+          integrante_id: integranteId,
+          moodle_user_id: payment.moodle_user_id,
+          moodle_course_id: PAYMENT_COURSE_ID,
+          detalle: {
+            assignment_id: assignmentId,
+            submission_id: payment.submission_id,
+            attemptnumber: payment.attemptnumber,
+          },
+          resultado: "ERROR",
+          error: message,
+        });
+        throw new Error(message);
+      }
     }
 
     if (action === "ensure_user") {
