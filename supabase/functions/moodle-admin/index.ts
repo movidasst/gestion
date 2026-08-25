@@ -305,21 +305,24 @@ async function getPaymentAssignment(): Promise<{ course: JsonObject; assignment:
 async function getPaymentSnapshot(admin: SupabaseAdminClient): Promise<PaymentSnapshot> {
   const context = await getPaymentAssignment();
   const assignmentId = positiveInteger(context.assignment.id, "La tarea de pago");
-  const [submissionResponse, enrolledResponse] = await Promise.all([
-    callMoodle("mod_assign_get_submissions", {
-      "assignmentids[0]": assignmentId,
-      status: "",
-      since: 0,
-      before: 0,
-    }),
-    callMoodle("core_enrol_get_enrolled_users", { courseid: PAYMENT_COURSE_ID }),
-  ]);
-
-  const assignmentSubmissions = asObjects(asObject(submissionResponse).assignments)
+  const submissionResponse = asObject(await callMoodle("mod_assign_get_submissions", {
+    "assignmentids[0]": assignmentId,
+    status: "",
+    since: 0,
+    before: 0,
+  }));
+  const assignmentSubmissions = asObjects(submissionResponse.assignments)
     .find((item) => Number(item.assignmentid || 0) === assignmentId);
+  if (!assignmentSubmissions) {
+    const warning = asObjects(submissionResponse.warnings)
+      .find((item) => String(item.warningcode || "") === "1");
+    if (warning) {
+      throw new Error(
+        "Moodle no permitió leer las entregas de “Sube tu pago”. Verifica que el usuario del servicio tenga permiso para ver y calificar esta tarea.",
+      );
+    }
+  }
   const submissions = asObjects(assignmentSubmissions?.submissions);
-  const users = asObjects(enrolledResponse);
-  const userMap = new Map(users.map((user) => [Number(user.id || 0), user]));
   const moodleUserIds = [...new Set(submissions.map((item) => Number(item.userid || 0)).filter(Boolean))];
   let linkedMembers: Record<string, unknown>[] = [];
 
@@ -338,12 +341,10 @@ async function getPaymentSnapshot(admin: SupabaseAdminClient): Promise<PaymentSn
       const files = getSubmissionFiles(submission);
       if (!files.length) return null;
       const moodleUserId = Number(submission.userid || 0);
-      const user = userMap.get(moodleUserId) || {};
       const member = memberMap.get(moodleUserId) || null;
       const gradingstatus = String(submission.gradingstatus || "notgraded").toLowerCase();
       const fullname = String(
-        user.fullname ||
-          `${String(user.firstname || member?.nombres || "")} ${String(user.lastname || member?.apellidos || "")}`.trim() ||
+        `${String(member?.nombres || "")} ${String(member?.apellidos || "")}`.trim() ||
           `Usuario Moodle #${moodleUserId}`,
       );
       return {
@@ -357,8 +358,8 @@ async function getPaymentSnapshot(admin: SupabaseAdminClient): Promise<PaymentSn
         processed: gradingstatus === "graded",
         student: {
           fullname,
-          email: String(user.email || member?.correo || ""),
-          idnumber: String(user.idnumber || member?.documento || member?.cedula || ""),
+          email: String(member?.correo || ""),
+          idnumber: String(member?.documento || member?.cedula || ""),
         },
         member: member
           ? {
