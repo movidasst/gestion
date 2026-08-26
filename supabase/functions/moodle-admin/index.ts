@@ -283,6 +283,22 @@ function enrolledUserIsStudent(user: JsonObject): boolean {
   });
 }
 
+function enrolledUserCanBeBulkUnenrolled(user: JsonObject): boolean {
+  const roles = asObjects(user.roles);
+  if (!roles.length) return false;
+  const elevatedRoleIds = new Set([1, 2, 3, 4]);
+  const elevatedShortnames = new Set(["manager", "coursecreator", "editingteacher", "teacher"]);
+  const hasStudentRole = roles.some((role) =>
+    Number(role.roleid || role.id || 0) === STUDENT_ROLE_ID ||
+    String(role.shortname || "").trim().toLowerCase() === "student"
+  );
+  const hasElevatedRole = roles.some((role) =>
+    elevatedRoleIds.has(Number(role.roleid || role.id || 0)) ||
+    elevatedShortnames.has(String(role.shortname || "").trim().toLowerCase())
+  );
+  return hasStudentRole && !hasElevatedRole;
+}
+
 function normalizeEnrolledUser(raw: unknown): JsonObject {
   const user = asObject(raw);
   const fullname = String(user.fullname || "").trim() ||
@@ -308,6 +324,28 @@ async function getCourseStudents(courseId: number): Promise<JsonObject[]> {
     .filter(enrolledUserIsStudent)
     .map(normalizeEnrolledUser)
     .filter((user) => Number(user.id || 0) > 0 && user.suspended !== true);
+}
+
+function filterAcademicStudents(
+  students: JsonObject[],
+  inactiveDays: number,
+  search: string,
+  requestedStatus: string,
+): JsonObject[] {
+  let filtered = students;
+  if (search) {
+    const needle = search.toLocaleLowerCase("es");
+    filtered = filtered.filter((student) =>
+      [student.fullname, student.email, student.idnumber]
+        .some((value) => String(value || "").toLocaleLowerCase("es").includes(needle))
+    );
+  }
+  if (["active", "inactive", "never"].includes(requestedStatus)) {
+    filtered = filtered.filter((student) =>
+      accessStatus(Number(student.lastcourseaccess || 0), inactiveDays) === requestedStatus
+    );
+  }
+  return filtered;
 }
 
 function accessStatus(lastAccess: number, inactiveDays: number): "active" | "inactive" | "never" {
@@ -484,19 +522,12 @@ async function getAcademicCourseStudents(
   const course = (await getCourses()).find((item) => Number(item.id || 0) === courseId);
   if (!course) throw new Error("El curso no existe o no está disponible.");
 
-  let students = await getCourseStudents(courseId);
-  if (search) {
-    const needle = search.toLocaleLowerCase("es");
-    students = students.filter((student) =>
-      [student.fullname, student.email, student.idnumber]
-        .some((value) => String(value || "").toLocaleLowerCase("es").includes(needle))
-    );
-  }
-  if (["active", "inactive", "never"].includes(requestedStatus)) {
-    students = students.filter((student) =>
-      accessStatus(Number(student.lastcourseaccess || 0), inactiveDays) === requestedStatus
-    );
-  }
+  let students = filterAcademicStudents(
+    await getCourseStudents(courseId),
+    inactiveDays,
+    search,
+    requestedStatus,
+  );
   students.sort((left, right) => {
     const leftStatus = accessStatus(Number(left.lastcourseaccess || 0), inactiveDays);
     const rightStatus = accessStatus(Number(right.lastcourseaccess || 0), inactiveDays);
@@ -549,6 +580,116 @@ async function getAcademicCourseStudents(
       attention: rows.filter((student) => student.status === "attention").length,
       pending_activities: rows.reduce((sum, student) => sum + Number(student.activities_pending || 0), 0),
     },
+  };
+}
+
+async function resolveBulkUnenrolTargets(
+  courseId: number,
+  inactiveDays: number,
+  search: string,
+  requestedStatus: string,
+  mode: "selected" | "filtered",
+  requestedUserIds: number[],
+): Promise<{ course: JsonObject; targets: JsonObject[]; excluded: number }> {
+  const course = (await getCourses()).find((item) => Number(item.id || 0) === courseId);
+  if (!course) throw new Error("El curso no existe o no está disponible.");
+
+  const filtered = filterAcademicStudents(
+    await getCourseStudents(courseId),
+    inactiveDays,
+    search,
+    requestedStatus,
+  );
+  const eligible = filtered.filter(enrolledUserCanBeBulkUnenrolled);
+  let targets = eligible;
+  let excluded = filtered.length - eligible.length;
+
+  if (mode === "selected") {
+    const requested = new Set(requestedUserIds);
+    targets = eligible.filter((student) => requested.has(Number(student.id || 0)));
+    excluded = Math.max(0, requested.size - targets.length);
+  }
+
+  if (targets.length > 2000) {
+    throw new Error("La operación supera el máximo de 2.000 estudiantes. Aplica un filtro más específico.");
+  }
+  targets.sort((left, right) =>
+    String(left.fullname || "").localeCompare(String(right.fullname || ""), "es")
+  );
+  return { course, targets, excluded };
+}
+
+async function bulkUnenrolStudents(
+  admin: SupabaseAdminClient,
+  adminUserId: string,
+  course: JsonObject,
+  targets: JsonObject[],
+): Promise<JsonObject> {
+  const courseId = Number(course.id || 0);
+  const succeeded: JsonObject[] = [];
+  const failed: JsonObject[] = [];
+
+  for (const batch of chunks(targets, 25)) {
+    const parameters: Record<string, MoodleParameter> = {};
+    batch.forEach((student, index) => {
+      parameters[`enrolments[${index}][userid]`] = Number(student.id || 0);
+      parameters[`enrolments[${index}][courseid]`] = courseId;
+    });
+    try {
+      await callMoodle("enrol_manual_unenrol_users", parameters);
+      succeeded.push(...batch);
+    } catch (error) {
+      const message = cleanError(error);
+      failed.push(...batch.map((student) => ({ ...student, error: message })));
+    }
+  }
+
+  const allUserIds = targets.map((student) => Number(student.id || 0)).filter(Boolean);
+  let members: JsonObject[] = [];
+  if (allUserIds.length) {
+    const { data, error } = await admin
+      .from("integrantes")
+      .select("id,moodle_user_id")
+      .in("moodle_user_id", allUserIds);
+    if (error) console.error("No se pudieron relacionar integrantes para la auditoría masiva:", error.message);
+    else members = data || [];
+  }
+  const memberMap = new Map(members.map((member) => [Number(member.moodle_user_id || 0), Number(member.id || 0)]));
+  const succeededIds = new Set(succeeded.map((student) => Number(student.id || 0)));
+  const auditRows = targets.map((student) => {
+    const moodleUserId = Number(student.id || 0);
+    const failure = failed.find((item) => Number(item.id || 0) === moodleUserId);
+    return {
+      admin_user_id: adminUserId,
+      accion: "DESMATRICULAR",
+      integrante_id: memberMap.get(moodleUserId) || null,
+      moodle_user_id: moodleUserId,
+      moodle_course_id: courseId,
+      detalle: {
+        roleid: STUDENT_ROLE_ID,
+        bulk: true,
+        course_name: String(course.fullname || ""),
+        student_name: String(student.fullname || ""),
+      },
+      resultado: succeededIds.has(moodleUserId) ? "OK" : "ERROR",
+      error: failure ? String(failure.error || "No fue posible desmatricular.") : null,
+    };
+  });
+  if (auditRows.length) {
+    const { error } = await admin.from("moodle_admin_auditoria").insert(auditRows);
+    if (error) console.error("No se pudo guardar la auditoría masiva Moodle:", error.message);
+  }
+
+  return {
+    course,
+    requested: targets.length,
+    unenrolled: succeeded.length,
+    failed: failed.length,
+    failed_students: failed.slice(0, 20).map((student) => ({
+      id: Number(student.id || 0),
+      fullname: String(student.fullname || ""),
+      error: String(student.error || ""),
+    })),
   };
 }
 
@@ -1168,6 +1309,51 @@ Deno.serve(async (req: Request) => {
         status,
       );
       return json(req, { ok: true, ...result });
+    }
+
+    if (action === "bulk_unenroll_preview" || action === "bulk_unenroll") {
+      const courseId = positiveInteger(body.course_id, "El curso");
+      const inactiveDays = Math.min(180, Math.max(1, Number(body.inactive_days || 15)));
+      const search = normalizeSearch(body.search);
+      const status = String(body.status || "all").trim().toLowerCase();
+      const mode = String(body.mode || "selected").trim().toLowerCase();
+      if (mode !== "selected" && mode !== "filtered") throw new Error("El alcance de la desmatriculación no es válido.");
+      const requestedUserIds = [...new Set((Array.isArray(body.user_ids) ? body.user_ids : [])
+        .map((value) => Number(value))
+        .filter((value) => Number.isInteger(value) && value > 0))];
+      if (mode === "selected" && !requestedUserIds.length) throw new Error("Selecciona al menos un estudiante.");
+
+      const resolved = await resolveBulkUnenrolTargets(
+        courseId,
+        inactiveDays,
+        search,
+        status,
+        mode,
+        requestedUserIds,
+      );
+      if (action === "bulk_unenroll_preview") {
+        return json(req, {
+          ok: true,
+          course: resolved.course,
+          count: resolved.targets.length,
+          excluded: resolved.excluded,
+          user_ids: resolved.targets.map((student) => Number(student.id || 0)),
+          sample: resolved.targets.slice(0, 20).map((student) => ({
+            id: Number(student.id || 0),
+            fullname: String(student.fullname || ""),
+            email: String(student.email || ""),
+            access_status: accessStatus(Number(student.lastcourseaccess || 0), inactiveDays),
+          })),
+        });
+      }
+      if (body.confirmed !== true) throw new Error("La operación masiva requiere confirmación explícita.");
+      if (!resolved.targets.length) throw new Error("No hay estudiantes elegibles para desmatricular.");
+      const expectedCount = positiveInteger(body.expected_count, "La cantidad confirmada");
+      if (resolved.targets.length !== expectedCount) {
+        throw new Error("La matrícula cambió después de la confirmación. Actualiza la lista y vuelve a intentarlo.");
+      }
+      const result = await bulkUnenrolStudents(admin, adminUserId, resolved.course, resolved.targets);
+      return json(req, { ok: true, result });
     }
 
     if (action === "duplicate_course") {
