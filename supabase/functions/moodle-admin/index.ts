@@ -12,6 +12,18 @@ type PaymentFile = {
   fileurl: string;
 };
 
+type PaymentAssignment = {
+  course_id: number;
+  course_name: string;
+  course_shortname: string;
+  assignment_id: number;
+  assignment_cmid: number;
+  assignment_name: string;
+  grade: number;
+  markingworkflow: number;
+  teamsubmission: number;
+};
+
 type PaymentRow = {
   submission_id: number;
   moodle_user_id: number;
@@ -21,14 +33,17 @@ type PaymentRow = {
   submission_status: string;
   gradingstatus: string;
   processed: boolean;
+  course: JsonObject;
+  assignment: JsonObject;
   student: JsonObject;
   member: JsonObject | null;
   files: PaymentFile[];
 };
 
 type PaymentSnapshot = {
-  course: JsonObject;
-  assignment: JsonObject;
+  assignments: PaymentAssignment[];
+  courses_without_payment: JsonObject[];
+  warnings: JsonObject[];
   rows: PaymentRow[];
 };
 
@@ -39,8 +54,6 @@ const ALLOWED_ORIGINS = new Set([
 
 const STUDENT_ROLE_ID = 5;
 const JSON_CONTENT_TYPE = "application/json; charset=utf-8";
-const PAYMENT_COURSE_ID = 138;
-const PAYMENT_ASSIGNMENT_CM_ID = 933;
 const PAYMENT_ASSIGNMENT_NAME = "Sube tu pago";
 const PAYMENT_APPROVAL_GRADE = 100;
 const MAX_PAYMENT_FILE_BYTES = 15 * 1024 * 1024;
@@ -270,61 +283,103 @@ function getSubmissionFiles(submission: Record<string, unknown>): PaymentFile[] 
   return files;
 }
 
-async function getPaymentAssignment(): Promise<{ course: JsonObject; assignment: JsonObject }> {
-  const response = asObject(await callMoodle("mod_assign_get_assignments", {
-    "courseids[0]": PAYMENT_COURSE_ID,
+function isPaymentAssignmentName(value: unknown): boolean {
+  const normalized = String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+  return normalized === PAYMENT_ASSIGNMENT_NAME.toLowerCase();
+}
+
+function chunks<T>(items: T[], size: number): T[][] {
+  const result: T[][] = [];
+  for (let index = 0; index < items.length; index += size) {
+    result.push(items.slice(index, index + size));
+  }
+  return result;
+}
+
+async function getPaymentAssignments(): Promise<{
+  assignments: PaymentAssignment[];
+  courses_without_payment: JsonObject[];
+  warnings: JsonObject[];
+}> {
+  const courses = await getCourses();
+  if (!courses.length) return { assignments: [], courses_without_payment: [], warnings: [] };
+
+  const responses = await Promise.all(chunks(courses, 50).map((courseBatch) => {
+    const parameters: Record<string, MoodleParameter> = { includenotenrolledcourses: 1 };
+    courseBatch.forEach((course, index) => {
+      parameters[`courseids[${index}]`] = Number(course.id || 0);
+    });
+    return callMoodle("mod_assign_get_assignments", parameters);
   }));
-  const course = asObjects(response.courses)
-    .find((item) => Number(item.id || 0) === PAYMENT_COURSE_ID);
-  if (!course) {
-    throw new Error(`Moodle no devolvió el curso piloto #${PAYMENT_COURSE_ID}.`);
+
+  const assignments: PaymentAssignment[] = [];
+  const warnings: JsonObject[] = [];
+  for (const rawResponse of responses) {
+    const response = asObject(rawResponse);
+    warnings.push(...asObjects(response.warnings));
+    for (const course of asObjects(response.courses)) {
+      for (const assignment of asObjects(course.assignments)) {
+        if (!isPaymentAssignmentName(assignment.name)) continue;
+        assignments.push({
+          course_id: Number(course.id || assignment.course || 0),
+          course_name: String(course.fullname || "Curso sin nombre"),
+          course_shortname: String(course.shortname || ""),
+          assignment_id: Number(assignment.id || 0),
+          assignment_cmid: Number(assignment.cmid || 0),
+          assignment_name: String(assignment.name || PAYMENT_ASSIGNMENT_NAME),
+          grade: Number(assignment.grade || 0),
+          markingworkflow: Number(assignment.markingworkflow || 0),
+          teamsubmission: Number(assignment.teamsubmission || 0),
+        });
+      }
+    }
   }
 
-  const assignment = asObjects(course.assignments)
-    .find((item) => Number(item.cmid || 0) === PAYMENT_ASSIGNMENT_CM_ID);
-  if (!assignment) {
-    throw new Error(`No se encontró la tarea “${PAYMENT_ASSIGNMENT_NAME}” (#${PAYMENT_ASSIGNMENT_CM_ID}).`);
-  }
-
-  return {
-    course: {
-      id: Number(course.id || 0),
-      fullname: String(course.fullname || "Curso piloto"),
-      shortname: String(course.shortname || ""),
-    },
-    assignment: {
-      id: Number(assignment.id || 0),
-      cmid: Number(assignment.cmid || 0),
-      name: String(assignment.name || PAYMENT_ASSIGNMENT_NAME),
-      grade: Number(assignment.grade || 0),
-      markingworkflow: Number(assignment.markingworkflow || 0),
-      teamsubmission: Number(assignment.teamsubmission || 0),
-    },
-  };
+  const paymentCourseIds = new Set(assignments.map((item) => item.course_id));
+  const coursesWithoutPayment = courses.filter((course) => !paymentCourseIds.has(Number(course.id || 0)));
+  assignments.sort((left, right) => left.course_name.localeCompare(right.course_name, "es"));
+  return { assignments, courses_without_payment: coursesWithoutPayment, warnings };
 }
 
 async function getPaymentSnapshot(admin: SupabaseAdminClient): Promise<PaymentSnapshot> {
-  const context = await getPaymentAssignment();
-  const assignmentId = positiveInteger(context.assignment.id, "La tarea de pago");
-  const submissionResponse = asObject(await callMoodle("mod_assign_get_submissions", {
-    "assignmentids[0]": assignmentId,
-    status: "",
-    since: 0,
-    before: 0,
+  const context = await getPaymentAssignments();
+  if (!context.assignments.length) return { ...context, rows: [] };
+
+  const responses = await Promise.all(chunks(context.assignments, 50).map((assignmentBatch) => {
+    const parameters: Record<string, MoodleParameter> = {
+      status: "",
+      since: 0,
+      before: 0,
+    };
+    assignmentBatch.forEach((assignment, index) => {
+      parameters[`assignmentids[${index}]`] = assignment.assignment_id;
+    });
+    return callMoodle("mod_assign_get_submissions", parameters);
   }));
-  const assignmentSubmissions = asObjects(submissionResponse.assignments)
-    .find((item) => Number(item.assignmentid || 0) === assignmentId);
-  if (!assignmentSubmissions) {
-    const warning = asObjects(submissionResponse.warnings)
-      .find((item) => String(item.warningcode || "") === "1");
-    if (warning) {
-      throw new Error(
-        "Moodle no permitió leer las entregas de “Sube tu pago”. Verifica que el usuario del servicio tenga permiso para ver y calificar esta tarea.",
+
+  const submissionsByAssignment = new Map<number, Record<string, unknown>[]>();
+  const warnings = [...context.warnings];
+  for (const rawResponse of responses) {
+    const response = asObject(rawResponse);
+    warnings.push(...asObjects(response.warnings));
+    for (const assignment of asObjects(response.assignments)) {
+      submissionsByAssignment.set(
+        Number(assignment.assignmentid || 0),
+        asObjects(assignment.submissions),
       );
     }
   }
-  const submissions = asObjects(assignmentSubmissions?.submissions);
-  const moodleUserIds = [...new Set(submissions.map((item) => Number(item.userid || 0)).filter(Boolean))];
+
+  const rawRows = context.assignments.flatMap((assignment) =>
+    (submissionsByAssignment.get(assignment.assignment_id) || [])
+      .map((submission) => ({ assignment, submission }))
+  );
+  const moodleUserIds = [...new Set(rawRows.map((item) => Number(item.submission.userid || 0)).filter(Boolean))];
   let linkedMembers: Record<string, unknown>[] = [];
 
   if (moodleUserIds.length) {
@@ -337,8 +392,8 @@ async function getPaymentSnapshot(admin: SupabaseAdminClient): Promise<PaymentSn
   }
 
   const memberMap = new Map(linkedMembers.map((member) => [Number(member.moodle_user_id || 0), member]));
-  const rows = submissions
-    .map((submission): PaymentRow | null => {
+  const rows = rawRows
+    .map(({ assignment, submission }): PaymentRow | null => {
       const files = getSubmissionFiles(submission);
       if (!files.length) return null;
       const moodleUserId = Number(submission.userid || 0);
@@ -357,6 +412,19 @@ async function getPaymentSnapshot(admin: SupabaseAdminClient): Promise<PaymentSn
         submission_status: String(submission.status || ""),
         gradingstatus,
         processed: gradingstatus === "graded",
+        course: {
+          id: assignment.course_id,
+          fullname: assignment.course_name,
+          shortname: assignment.course_shortname,
+        },
+        assignment: {
+          id: assignment.assignment_id,
+          cmid: assignment.assignment_cmid,
+          name: assignment.assignment_name,
+          grade: assignment.grade,
+          markingworkflow: assignment.markingworkflow,
+          teamsubmission: assignment.teamsubmission,
+        },
         student: {
           fullname,
           email: String(member?.correo || ""),
@@ -374,7 +442,7 @@ async function getPaymentSnapshot(admin: SupabaseAdminClient): Promise<PaymentSn
     .filter((row): row is PaymentRow => row !== null)
     .sort((left, right) => right.timemodified - left.timemodified);
 
-  return { ...context, rows };
+  return { ...context, warnings, rows };
 }
 
 function publicPaymentRow(row: PaymentRow): JsonObject {
@@ -575,14 +643,33 @@ Deno.serve(async (req: Request) => {
     if (action === "payment_submissions") {
       const snapshot = await getPaymentSnapshot(admin);
       const pending = snapshot.rows.filter((row) => !row.processed).length;
+      const paymentCourses = [...new Map(snapshot.assignments.map((assignment) => [
+        assignment.course_id,
+        {
+          id: assignment.course_id,
+          fullname: assignment.course_name,
+          shortname: assignment.course_shortname,
+        },
+      ])).values()];
       return json(req, {
         ok: true,
-        course: snapshot.course,
-        assignment: snapshot.assignment,
+        courses: paymentCourses,
+        assignments: snapshot.assignments.map((assignment) => ({
+          course_id: assignment.course_id,
+          assignment_id: assignment.assignment_id,
+          assignment_cmid: assignment.assignment_cmid,
+          assignment_name: assignment.assignment_name,
+          grade: assignment.grade,
+        })),
+        courses_without_payment: snapshot.courses_without_payment,
+        warnings: snapshot.warnings,
         summary: {
           total: snapshot.rows.length,
           pending,
           processed: snapshot.rows.length - pending,
+          payment_courses: paymentCourses.length,
+          payment_assignments: snapshot.assignments.length,
+          courses_without_payment: snapshot.courses_without_payment.length,
         },
         payments: snapshot.rows.map(publicPaymentRow),
       });
@@ -619,10 +706,13 @@ Deno.serve(async (req: Request) => {
         return json(req, { ok: true, already_processed: true, payment: publicPaymentRow(payment) });
       }
 
-      const assignmentId = positiveInteger(snapshot.assignment.id, "La tarea de pago");
-      const configuredGrade = Number(snapshot.assignment.grade || 0);
+      const assignmentId = positiveInteger(payment.assignment.id, "La tarea de pago");
+      const courseId = positiveInteger(payment.course.id, "El curso");
+      const configuredGrade = Number(payment.assignment.grade || 0);
       if (configuredGrade !== PAYMENT_APPROVAL_GRADE) {
-        throw new Error(`La tarea debe estar configurada sobre ${PAYMENT_APPROVAL_GRADE} puntos antes de aprobar pagos.`);
+        throw new Error(
+          `La tarea “${String(payment.assignment.name || PAYMENT_ASSIGNMENT_NAME)}” del curso “${String(payment.course.fullname || courseId)}” debe estar configurada sobre ${PAYMENT_APPROVAL_GRADE} puntos.`,
+        );
       }
 
       const integranteId = Number(payment.member?.id || 0) || null;
@@ -633,7 +723,7 @@ Deno.serve(async (req: Request) => {
           grade: PAYMENT_APPROVAL_GRADE,
           attemptnumber: payment.attemptnumber,
           addattempt: 0,
-          workflowstate: Number(snapshot.assignment.markingworkflow || 0) === 1 ? "released" : "",
+          workflowstate: Number(payment.assignment.markingworkflow || 0) === 1 ? "released" : "",
           applytoall: 0,
         });
         await audit(admin, {
@@ -641,11 +731,12 @@ Deno.serve(async (req: Request) => {
           accion: "APROBAR_PAGO",
           integrante_id: integranteId,
           moodle_user_id: payment.moodle_user_id,
-          moodle_course_id: PAYMENT_COURSE_ID,
+          moodle_course_id: courseId,
           detalle: {
             assignment_id: assignmentId,
-            assignment_cmid: PAYMENT_ASSIGNMENT_CM_ID,
-            assignment_name: String(snapshot.assignment.name || PAYMENT_ASSIGNMENT_NAME),
+            assignment_cmid: Number(payment.assignment.cmid || 0),
+            assignment_name: String(payment.assignment.name || PAYMENT_ASSIGNMENT_NAME),
+            course_name: String(payment.course.fullname || ""),
             submission_id: payment.submission_id,
             attemptnumber: payment.attemptnumber,
             grade: PAYMENT_APPROVAL_GRADE,
@@ -666,7 +757,7 @@ Deno.serve(async (req: Request) => {
           accion: "APROBAR_PAGO",
           integrante_id: integranteId,
           moodle_user_id: payment.moodle_user_id,
-          moodle_course_id: PAYMENT_COURSE_ID,
+          moodle_course_id: courseId,
           detalle: {
             assignment_id: assignmentId,
             submission_id: payment.submission_id,
