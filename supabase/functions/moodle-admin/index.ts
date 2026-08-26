@@ -321,7 +321,7 @@ function isEvaluationAssignmentName(value: unknown): boolean {
     .replace(/[\u0300-\u036f]/g, "")
     .trim()
     .toLowerCase();
-  return /(^|[^a-z0-9])tarea([^a-z0-9]|$)/.test(normalized);
+  return normalized.includes("tarea");
 }
 
 function chunks<T>(items: T[], size: number): T[][] {
