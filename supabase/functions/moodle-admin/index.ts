@@ -273,7 +273,6 @@ function getSubmissionFiles(submission: Record<string, unknown>): PaymentFile[] 
 async function getPaymentAssignment(): Promise<{ course: JsonObject; assignment: JsonObject }> {
   const response = asObject(await callMoodle("mod_assign_get_assignments", {
     "courseids[0]": PAYMENT_COURSE_ID,
-    includenotenrolledcourses: 1,
   }));
   const course = asObjects(response.courses)
     .find((item) => Number(item.id || 0) === PAYMENT_COURSE_ID);
