@@ -184,17 +184,19 @@ async function callMoodle(
   try {
     payload = raw ? JSON.parse(raw) : null;
   } catch {
-    throw new Error(`Moodle devolvió una respuesta no válida (${response.status}).`);
+    throw new Error(`Moodle bloqueó ${functionName}: respuesta no válida (${response.status}).`);
   }
 
   if (!response.ok) {
-    throw new Error(`Moodle respondió con HTTP ${response.status}.`);
+    throw new Error(`Moodle bloqueó ${functionName}: HTTP ${response.status}.`);
   }
 
   if (payload && typeof payload === "object" && !Array.isArray(payload)) {
     const error = payload as Record<string, unknown>;
     if (error.exception || error.errorcode) {
-      throw new Error(String(error.message || error.errorcode || "Moodle rechazó la operación."));
+      const code = String(error.errorcode || error.exception || "error_moodle");
+      const message = String(error.message || "Moodle rechazó la operación.");
+      throw new Error(`Moodle bloqueó ${functionName} [${code}]: ${message}`);
     }
   }
 
