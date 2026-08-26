@@ -200,7 +200,7 @@ async function callMoodle(
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
     body: form,
-    signal: AbortSignal.timeout(30000),
+    signal: AbortSignal.timeout(functionName === "core_course_duplicate_course" ? 120000 : 30000),
   });
   const raw = await response.text();
   let payload: unknown;
@@ -272,6 +272,284 @@ async function getUserCourses(moodleUserId: number): Promise<JsonObject[]> {
     returnusercount: 0,
   });
   return (Array.isArray(response) ? response : []).map(normalizeCourse);
+}
+
+function enrolledUserIsStudent(user: JsonObject): boolean {
+  const roles = asObjects(user.roles);
+  if (!roles.length) return true;
+  return roles.some((role) => {
+    const shortname = String(role.shortname || "").trim().toLowerCase();
+    return Number(role.roleid || role.id || 0) === STUDENT_ROLE_ID || shortname === "student";
+  });
+}
+
+function normalizeEnrolledUser(raw: unknown): JsonObject {
+  const user = asObject(raw);
+  const fullname = String(user.fullname || "").trim() ||
+    `${String(user.firstname || "").trim()} ${String(user.lastname || "").trim()}`.trim() ||
+    `Usuario Moodle #${Number(user.id || 0)}`;
+  return {
+    id: Number(user.id || 0),
+    fullname,
+    email: String(user.email || "").trim(),
+    idnumber: String(user.idnumber || "").trim(),
+    lastaccess: Number(user.lastaccess || 0),
+    lastcourseaccess: Number(user.lastcourseaccess || 0),
+    firstaccess: Number(user.firstaccess || 0),
+    suspended: user.suspended === true || Number(user.suspended || 0) === 1,
+    profileimageurlsmall: String(user.profileimageurlsmall || ""),
+    roles: asObjects(user.roles),
+  };
+}
+
+async function getCourseStudents(courseId: number): Promise<JsonObject[]> {
+  const response = await callMoodle("core_enrol_get_enrolled_users", { courseid: courseId });
+  return asObjects(response)
+    .filter(enrolledUserIsStudent)
+    .map(normalizeEnrolledUser)
+    .filter((user) => Number(user.id || 0) > 0 && user.suspended !== true);
+}
+
+function accessStatus(lastAccess: number, inactiveDays: number): "active" | "inactive" | "never" {
+  if (!lastAccess) return "never";
+  const cutoff = Math.floor(Date.now() / 1000) - inactiveDays * 86400;
+  return lastAccess >= cutoff ? "active" : "inactive";
+}
+
+async function getAcademicOverview(inactiveDays: number): Promise<JsonObject> {
+  const courses = (await getCourses()).filter((course) => course.visible !== false);
+  const rows: JsonObject[] = [];
+  const uniqueStudents = new Map<number, JsonObject>();
+
+  for (const courseBatch of chunks(courses, 6)) {
+    const batch = await Promise.all(courseBatch.map(async (course) => {
+      try {
+        const students = await getCourseStudents(Number(course.id || 0));
+        let active = 0;
+        let inactive = 0;
+        let never = 0;
+        for (const student of students) {
+          const lastCourseAccess = Number(student.lastcourseaccess || 0);
+          const status = accessStatus(lastCourseAccess, inactiveDays);
+          if (status === "active") active++;
+          else if (status === "inactive") inactive++;
+          else never++;
+
+          const userId = Number(student.id || 0);
+          const previous = uniqueStudents.get(userId);
+          const previousAccess = Number(previous?.lastcourseaccess || 0);
+          if (!previous || lastCourseAccess > previousAccess) {
+            uniqueStudents.set(userId, { ...student, lastcourseaccess: lastCourseAccess });
+          }
+        }
+        return {
+          ...course,
+          enrolled: students.length,
+          active,
+          inactive,
+          never,
+          alerts: inactive + never,
+          error: null,
+        };
+      } catch (error) {
+        return {
+          ...course,
+          enrolled: 0,
+          active: 0,
+          inactive: 0,
+          never: 0,
+          alerts: 0,
+          error: cleanError(error),
+        };
+      }
+    }));
+    rows.push(...batch);
+  }
+
+  const unique = [...uniqueStudents.values()];
+  const activeStudents = unique.filter((student) =>
+    accessStatus(Number(student.lastcourseaccess || 0), inactiveDays) === "active"
+  ).length;
+  const neverStudents = unique.filter((student) => !Number(student.lastcourseaccess || 0)).length;
+  const inactiveStudents = unique.length - activeStudents - neverStudents;
+
+  rows.sort((left, right) => {
+    const alertsOrder = Number(right.alerts || 0) - Number(left.alerts || 0);
+    return alertsOrder || String(left.fullname || "").localeCompare(String(right.fullname || ""), "es");
+  });
+
+  return {
+    inactive_days: inactiveDays,
+    courses: rows,
+    summary: {
+      courses: courses.length,
+      readable_courses: rows.filter((course) => !course.error).length,
+      students: unique.length,
+      active_students: activeStudents,
+      inactive_students: inactiveStudents,
+      never_accessed: neverStudents,
+      alerts: inactiveStudents + neverStudents,
+      enrolments: rows.reduce((sum, course) => sum + Number(course.enrolled || 0), 0),
+    },
+  };
+}
+
+function gradeSummary(raw: unknown): JsonObject {
+  const response = asObject(raw);
+  const userGrade = asObjects(response.usergrades)[0] || {};
+  const items = asObjects(userGrade.gradeitems);
+  const courseItem = items.find((item) => String(item.itemtype || "") === "course") || items[0] || {};
+  const rawGrade = courseItem.graderaw == null || courseItem.graderaw === ""
+    ? null
+    : Number(courseItem.graderaw);
+  const maximum = Number(courseItem.grademax || 0);
+  const percentage = rawGrade != null && Number.isFinite(rawGrade) && maximum > 0
+    ? Math.round((rawGrade * 10000) / maximum) / 100
+    : null;
+  return {
+    raw: rawGrade != null && Number.isFinite(rawGrade) ? rawGrade : null,
+    maximum,
+    percentage,
+    formatted: String(courseItem.gradeformatted || "").trim(),
+    percentage_formatted: String(courseItem.percentageformatted || "").trim(),
+    graded_items: items.filter((item) => item.graderaw != null && item.graderaw !== "").length,
+  };
+}
+
+async function getAcademicStudentDetail(
+  course: JsonObject,
+  student: JsonObject,
+  inactiveDays: number,
+): Promise<JsonObject> {
+  const courseId = Number(course.id || 0);
+  const userId = Number(student.id || 0);
+  const results = await Promise.allSettled([
+    callMoodle("core_completion_get_course_completion_status", { courseid: courseId, userid: userId }),
+    callMoodle("core_completion_get_activities_completion_status", { courseid: courseId, userid: userId }),
+    callMoodle("gradereport_user_get_grade_items", { courseid: courseId, userid: userId }),
+  ]);
+
+  const completion = results[0].status === "fulfilled" ? asObject(results[0].value) : {};
+  const activities = results[1].status === "fulfilled" ? asObject(results[1].value) : {};
+  const grades = results[2].status === "fulfilled" ? gradeSummary(results[2].value) : gradeSummary({});
+  const completionStatus = asObject(completion.completionstatus);
+  const statuses = asObjects(activities.statuses);
+  const completedActivities = statuses.filter((status) => Number(status.state || 0) > 0);
+  const pendingActivities = statuses.filter((status) => Number(status.state || 0) === 0);
+  const completed = completionStatus.completed === true || Number(completionStatus.completed || 0) === 1;
+  const progress = statuses.length
+    ? Math.round((completedActivities.length * 1000) / statuses.length) / 10
+    : completed
+    ? 100
+    : null;
+  const lastAccess = Number(student.lastcourseaccess || 0);
+  const access = accessStatus(lastAccess, inactiveDays);
+  const courseEnded = Number(course.enddate || 0) > 0 && Number(course.enddate || 0) < Math.floor(Date.now() / 1000);
+  const alerts: JsonObject[] = [];
+
+  if (access === "never") alerts.push({ code: "never", severity: "danger", message: "Nunca ha ingresado al curso" });
+  if (access === "inactive") alerts.push({ code: "inactive", severity: "warn", message: `Sin ingresar durante más de ${inactiveDays} días` });
+  if (courseEnded && !completed) alerts.push({ code: "overdue", severity: "danger", message: "El curso terminó y sigue pendiente" });
+  if (progress === 0 && access !== "never") alerts.push({ code: "no_progress", severity: "warn", message: "Ingresó, pero no registra avance" });
+  if (Number(grades.percentage) < 50 && grades.percentage != null) {
+    alerts.push({ code: "low_grade", severity: "danger", message: "Calificación acumulada inferior a 50%" });
+  }
+
+  const errors = results.flatMap((result) => result.status === "rejected" ? [cleanError(result.reason)] : []);
+  return {
+    ...student,
+    access_status: access,
+    completed,
+    progress,
+    activities_total: statuses.length,
+    activities_completed: completedActivities.length,
+    activities_pending: pendingActivities.length,
+    pending_names: pendingActivities.slice(0, 6).map((item) => String(item.name || item.modname || "Actividad pendiente")),
+    grade: grades,
+    alerts,
+    status: completed ? "completed" : alerts.length ? "attention" : "progress",
+    errors,
+  };
+}
+
+async function getAcademicCourseStudents(
+  admin: SupabaseAdminClient,
+  courseId: number,
+  inactiveDays: number,
+  page: number,
+  perPage: number,
+  search: string,
+  requestedStatus: string,
+): Promise<JsonObject> {
+  const course = (await getCourses()).find((item) => Number(item.id || 0) === courseId);
+  if (!course) throw new Error("El curso no existe o no está disponible.");
+
+  let students = await getCourseStudents(courseId);
+  if (search) {
+    const needle = search.toLocaleLowerCase("es");
+    students = students.filter((student) =>
+      [student.fullname, student.email, student.idnumber]
+        .some((value) => String(value || "").toLocaleLowerCase("es").includes(needle))
+    );
+  }
+  if (["active", "inactive", "never"].includes(requestedStatus)) {
+    students = students.filter((student) =>
+      accessStatus(Number(student.lastcourseaccess || 0), inactiveDays) === requestedStatus
+    );
+  }
+  students.sort((left, right) => {
+    const leftStatus = accessStatus(Number(left.lastcourseaccess || 0), inactiveDays);
+    const rightStatus = accessStatus(Number(right.lastcourseaccess || 0), inactiveDays);
+    const rank = { never: 0, inactive: 1, active: 2 };
+    return rank[leftStatus] - rank[rightStatus] ||
+      String(left.fullname || "").localeCompare(String(right.fullname || ""), "es");
+  });
+
+  const total = students.length;
+  const from = page * perPage;
+  const pageStudents = students.slice(from, from + perPage);
+  const ids = pageStudents.map((student) => Number(student.id || 0)).filter(Boolean);
+  let members: JsonObject[] = [];
+  if (ids.length) {
+    const { data, error } = await admin
+      .from("integrantes")
+      .select("id,nombres,apellidos,documento,cedula,correo,moodle_user_id")
+      .in("moodle_user_id", ids);
+    if (error) throw new Error(`No se pudieron relacionar los integrantes: ${error.message}`);
+    members = data || [];
+  }
+  const memberMap = new Map(members.map((member) => [Number(member.moodle_user_id || 0), member]));
+  const rows: JsonObject[] = [];
+  for (const batch of chunks(pageStudents, 5)) {
+    const detailed = await Promise.all(batch.map((student) =>
+      getAcademicStudentDetail(course, student, inactiveDays)
+    ));
+    rows.push(...detailed.map((student) => {
+      const member = memberMap.get(Number(student.id || 0));
+      return {
+        ...student,
+        member_id: Number(member?.id || 0) || null,
+        idnumber: String(member?.documento || member?.cedula || student.idnumber || ""),
+        email: String(member?.correo || student.email || ""),
+      };
+    }));
+  }
+
+  return {
+    course,
+    students: rows,
+    page,
+    perpage: perPage,
+    total,
+    pages: Math.max(1, Math.ceil(total / perPage)),
+    inactive_days: inactiveDays,
+    summary: {
+      shown: rows.length,
+      completed: rows.filter((student) => student.completed === true).length,
+      attention: rows.filter((student) => student.status === "attention").length,
+      pending_activities: rows.reduce((sum, student) => sum + Number(student.activities_pending || 0), 0),
+    },
+  };
 }
 
 function getSubmissionFiles(submission: Record<string, unknown>): PaymentFile[] {
@@ -753,7 +1031,7 @@ async function audit(
   admin: SupabaseAdminClient,
   values: {
     admin_user_id: string;
-    accion: "CREAR_VINCULAR_USUARIO" | "MATRICULAR" | "DESMATRICULAR" | "APROBAR_PAGO" | "CALIFICAR_TAREA";
+    accion: "CREAR_VINCULAR_USUARIO" | "MATRICULAR" | "DESMATRICULAR" | "APROBAR_PAGO" | "CALIFICAR_TAREA" | "CREAR_CURSO_DESDE_PLANTILLA";
     integrante_id?: number | null;
     moodle_user_id?: number | null;
     moodle_course_id?: number | null;
@@ -829,8 +1107,9 @@ Deno.serve(async (req: Request) => {
     }
 
     if (action === "summary") {
-      const [courses, linked, pending, grades, passed] = await Promise.all([
+      const [courses, siteInfo, linked, pending, grades, passed] = await Promise.all([
         getCourses(),
+        callMoodle("core_webservice_get_site_info"),
         admin.from("integrantes").select("id", { count: "exact", head: true }).not("moodle_user_id", "is", null),
         admin.from("integrantes").select("id", { count: "exact", head: true }).in("moodle_sync_status", ["PENDIENTE", "PROCESANDO", "PENDIENTE_VERIFICACION", "ERROR"]),
         admin.from("calificaciones_moodle").select("id", { count: "exact", head: true }).eq("tiene_nota", true),
@@ -839,6 +1118,15 @@ Deno.serve(async (req: Request) => {
       for (const result of [linked, pending, grades, passed]) {
         if (result.error) throw new Error(result.error.message);
       }
+      const availableFunctions = new Set(
+        asObjects(asObject(siteInfo).functions).map((item) => String(item.name || "")),
+      );
+      const academicReadFunctions = [
+        "core_enrol_get_enrolled_users",
+        "core_completion_get_course_completion_status",
+        "core_completion_get_activities_completion_status",
+        "gradereport_user_get_grade_items",
+      ];
       return json(req, {
         ok: true,
         summary: {
@@ -847,9 +1135,93 @@ Deno.serve(async (req: Request) => {
           pending_users: pending.count || 0,
           graded_records: grades.count || 0,
           passed_records: passed.count || 0,
+          capabilities: {
+            academic_read: academicReadFunctions.every((name) => availableFunctions.has(name)),
+            academic_missing: academicReadFunctions.filter((name) => !availableFunctions.has(name)),
+            duplicate_course: availableFunctions.has("core_course_duplicate_course"),
+          },
         },
         courses,
       });
+    }
+
+    if (action === "academic_overview") {
+      const inactiveDays = Math.min(180, Math.max(1, Number(body.inactive_days || 15)));
+      const overview = await getAcademicOverview(inactiveDays);
+      return json(req, { ok: true, ...overview });
+    }
+
+    if (action === "academic_course_students") {
+      const courseId = positiveInteger(body.course_id, "El curso");
+      const inactiveDays = Math.min(180, Math.max(1, Number(body.inactive_days || 15)));
+      const page = nonNegativeInteger(body.page || 0, "La página");
+      const perPage = Math.min(25, Math.max(5, Number(body.perpage || 15)));
+      const search = normalizeSearch(body.search);
+      const status = String(body.status || "all").trim().toLowerCase();
+      const result = await getAcademicCourseStudents(
+        admin,
+        courseId,
+        inactiveDays,
+        page,
+        perPage,
+        search,
+        status,
+      );
+      return json(req, { ok: true, ...result });
+    }
+
+    if (action === "duplicate_course") {
+      const sourceCourseId = positiveInteger(body.source_course_id, "El curso plantilla");
+      const fullname = String(body.fullname || "").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
+      const shortname = String(body.shortname || "").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
+      if (fullname.length < 3 || fullname.length > 254) throw new Error("El nombre del curso debe tener entre 3 y 254 caracteres.");
+      if (shortname.length < 2 || shortname.length > 100) throw new Error("El nombre corto debe tener entre 2 y 100 caracteres.");
+
+      const courses = await getCourses();
+      const source = courses.find((course) => Number(course.id || 0) === sourceCourseId);
+      if (!source) throw new Error("El curso seleccionado como plantilla no existe.");
+      if (courses.some((course) => String(course.shortname || "").toLocaleLowerCase("es") === shortname.toLocaleLowerCase("es"))) {
+        throw new Error("Ya existe un curso con ese nombre corto.");
+      }
+      const categoryId = positiveInteger(body.categoryid || source.categoryid, "La categoría");
+      const visible = body.visible === true ? 1 : 0;
+
+      try {
+        const result = asObject(await callMoodle("core_course_duplicate_course", {
+          courseid: sourceCourseId,
+          fullname,
+          shortname,
+          categoryid: categoryId,
+          visible,
+        }));
+        const createdCourseId = Number(result.id || result.courseid || 0) || null;
+        await audit(admin, {
+          admin_user_id: adminUserId,
+          accion: "CREAR_CURSO_DESDE_PLANTILLA",
+          moodle_course_id: createdCourseId,
+          detalle: {
+            source_course_id: sourceCourseId,
+            source_course_name: source.fullname,
+            fullname,
+            shortname,
+            categoryid: categoryId,
+            visible: Boolean(visible),
+          },
+          resultado: "OK",
+        });
+        return json(req, { ok: true, course: result, source });
+      } catch (error) {
+        const message = cleanError(error);
+        await audit(admin, {
+          admin_user_id: adminUserId,
+          accion: "CREAR_CURSO_DESDE_PLANTILLA",
+          moodle_course_id: sourceCourseId,
+          detalle: { source_course_id: sourceCourseId, fullname, shortname, categoryid: categoryId },
+          resultado: "ERROR",
+          error: message,
+        });
+        throw new Error(message);
+      }
     }
 
     if (action === "search_members") {
