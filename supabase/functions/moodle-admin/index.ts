@@ -301,6 +301,20 @@ function chunks<T>(items: T[], size: number): T[][] {
   return result;
 }
 
+async function getMoodleUsersByIds(userIds: number[]): Promise<JsonObject[]> {
+  if (!userIds.length) return [];
+
+  const responses = await Promise.all(chunks(userIds, 100).map((userIdBatch) => {
+    const parameters: Record<string, MoodleParameter> = { field: "id" };
+    userIdBatch.forEach((userId, index) => {
+      parameters[`values[${index}]`] = userId;
+    });
+    return callMoodle("core_user_get_users_by_field", parameters);
+  }));
+
+  return responses.flatMap(asObjects);
+}
+
 async function getPaymentAssignments(): Promise<{
   assignments: PaymentAssignment[];
   courses_without_payment: JsonObject[];
@@ -392,17 +406,36 @@ async function getPaymentSnapshot(admin: SupabaseAdminClient): Promise<PaymentSn
   }
 
   const memberMap = new Map(linkedMembers.map((member) => [Number(member.moodle_user_id || 0), member]));
+  const moodleLookupIds = moodleUserIds.filter((moodleUserId) => {
+    const member = memberMap.get(moodleUserId);
+    if (!member) return true;
+    const memberName = `${String(member.nombres || "")} ${String(member.apellidos || "")}`.trim();
+    return !memberName || !String(member.correo || "").trim();
+  });
+  let moodleUsers: JsonObject[] = [];
+  try {
+    moodleUsers = await getMoodleUsersByIds(moodleLookupIds);
+  } catch (error) {
+    const message = cleanError(error);
+    console.warn("No se pudieron completar los datos de usuarios desde Moodle:", message);
+    warnings.push({
+      warningcode: "moodle_user_lookup_failed",
+      message,
+    });
+  }
+  const moodleUserMap = new Map(moodleUsers.map((user) => [Number(user.id || 0), user]));
   const rows = rawRows
     .map(({ assignment, submission }): PaymentRow | null => {
       const files = getSubmissionFiles(submission);
       if (!files.length) return null;
       const moodleUserId = Number(submission.userid || 0);
       const member = memberMap.get(moodleUserId) || null;
+      const moodleUser = moodleUserMap.get(moodleUserId) || null;
       const gradingstatus = String(submission.gradingstatus || "notgraded").toLowerCase();
-      const fullname = String(
-        `${String(member?.nombres || "")} ${String(member?.apellidos || "")}`.trim() ||
-          `Usuario Moodle #${moodleUserId}`,
-      );
+      const memberName = `${String(member?.nombres || "")} ${String(member?.apellidos || "")}`.trim();
+      const moodleName = String(moodleUser?.fullname || "").trim() ||
+        `${String(moodleUser?.firstname || "")} ${String(moodleUser?.lastname || "")}`.trim();
+      const fullname = memberName || moodleName || `Usuario Moodle #${moodleUserId}`;
       return {
         submission_id: Number(submission.id || 0),
         moodle_user_id: moodleUserId,
@@ -427,8 +460,8 @@ async function getPaymentSnapshot(admin: SupabaseAdminClient): Promise<PaymentSn
         },
         student: {
           fullname,
-          email: String(member?.correo || ""),
-          idnumber: String(member?.documento || member?.cedula || ""),
+          email: String(member?.correo || moodleUser?.email || "").trim(),
+          idnumber: String(member?.documento || member?.cedula || moodleUser?.idnumber || "").trim(),
         },
         member: member
           ? {
