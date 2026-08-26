@@ -47,6 +47,16 @@ type PaymentSnapshot = {
   rows: PaymentRow[];
 };
 
+type EvaluationRow = PaymentRow & {
+  online_text: string;
+};
+
+type EvaluationSnapshot = {
+  assignments: PaymentAssignment[];
+  warnings: JsonObject[];
+  rows: EvaluationRow[];
+};
+
 const ALLOWED_ORIGINS = new Set([
   "https://gestion.movidasst.com",
   "https://movidasst.github.io",
@@ -57,6 +67,7 @@ const JSON_CONTENT_TYPE = "application/json; charset=utf-8";
 const PAYMENT_ASSIGNMENT_NAME = "Sube tu pago";
 const PAYMENT_APPROVAL_GRADE = 100;
 const MAX_PAYMENT_FILE_BYTES = 15 * 1024 * 1024;
+const MAX_FEEDBACK_LENGTH = 5000;
 
 function getAdminKey(): string {
   const direct = [
@@ -283,6 +294,17 @@ function getSubmissionFiles(submission: Record<string, unknown>): PaymentFile[] 
   return files;
 }
 
+function getSubmissionOnlineText(submission: Record<string, unknown>): string {
+  const parts: string[] = [];
+  for (const plugin of asObjects(submission.plugins)) {
+    for (const field of asObjects(plugin.editorfields)) {
+      const text = String(field.text || "").trim();
+      if (text) parts.push(text);
+    }
+  }
+  return parts.join("\n\n").slice(0, 50000);
+}
+
 function isPaymentAssignmentName(value: unknown): boolean {
   const normalized = String(value || "")
     .normalize("NFD")
@@ -291,6 +313,15 @@ function isPaymentAssignmentName(value: unknown): boolean {
     .trim()
     .toLowerCase();
   return normalized === PAYMENT_ASSIGNMENT_NAME.toLowerCase();
+}
+
+function isEvaluationAssignmentName(value: unknown): boolean {
+  const normalized = String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .toLowerCase();
+  return /(^|[^a-z0-9])tarea([^a-z0-9]|$)/.test(normalized);
 }
 
 function chunks<T>(items: T[], size: number): T[][] {
@@ -358,6 +389,194 @@ async function getPaymentAssignments(): Promise<{
   const coursesWithoutPayment = courses.filter((course) => !paymentCourseIds.has(Number(course.id || 0)));
   assignments.sort((left, right) => left.course_name.localeCompare(right.course_name, "es"));
   return { assignments, courses_without_payment: coursesWithoutPayment, warnings };
+}
+
+async function getEvaluationAssignments(): Promise<{
+  assignments: PaymentAssignment[];
+  warnings: JsonObject[];
+}> {
+  const courses = await getCourses();
+  if (!courses.length) return { assignments: [], warnings: [] };
+
+  const responses = await Promise.all(chunks(courses, 50).map((courseBatch) => {
+    const parameters: Record<string, MoodleParameter> = { includenotenrolledcourses: 1 };
+    courseBatch.forEach((course, index) => {
+      parameters[`courseids[${index}]`] = Number(course.id || 0);
+    });
+    return callMoodle("mod_assign_get_assignments", parameters);
+  }));
+
+  const assignments: PaymentAssignment[] = [];
+  const warnings: JsonObject[] = [];
+  for (const rawResponse of responses) {
+    const response = asObject(rawResponse);
+    warnings.push(...asObjects(response.warnings));
+    for (const course of asObjects(response.courses)) {
+      for (const assignment of asObjects(course.assignments)) {
+        if (!isEvaluationAssignmentName(assignment.name)) continue;
+        const assignmentId = Number(assignment.id || 0);
+        if (!assignmentId) continue;
+        assignments.push({
+          course_id: Number(course.id || assignment.course || 0),
+          course_name: String(course.fullname || "Curso sin nombre"),
+          course_shortname: String(course.shortname || ""),
+          assignment_id: assignmentId,
+          assignment_cmid: Number(assignment.cmid || 0),
+          assignment_name: String(assignment.name || "Tarea sin nombre"),
+          grade: Number(assignment.grade || 0),
+          markingworkflow: Number(assignment.markingworkflow || 0),
+          teamsubmission: Number(assignment.teamsubmission || 0),
+        });
+      }
+    }
+  }
+
+  assignments.sort((left, right) => {
+    const courseOrder = left.course_name.localeCompare(right.course_name, "es");
+    return courseOrder || left.assignment_name.localeCompare(right.assignment_name, "es");
+  });
+  return { assignments, warnings };
+}
+
+async function getEvaluationSnapshot(admin: SupabaseAdminClient): Promise<EvaluationSnapshot> {
+  const context = await getEvaluationAssignments();
+  if (!context.assignments.length) return { ...context, rows: [] };
+
+  const responses = await Promise.all(chunks(context.assignments, 50).map((assignmentBatch) => {
+    const parameters: Record<string, MoodleParameter> = {
+      status: "submitted",
+      since: 0,
+      before: 0,
+    };
+    assignmentBatch.forEach((assignment, index) => {
+      parameters[`assignmentids[${index}]`] = assignment.assignment_id;
+    });
+    return callMoodle("mod_assign_get_submissions", parameters);
+  }));
+
+  const submissionsByAssignment = new Map<number, JsonObject[]>();
+  const warnings = [...context.warnings];
+  for (const rawResponse of responses) {
+    const response = asObject(rawResponse);
+    warnings.push(...asObjects(response.warnings));
+    for (const assignment of asObjects(response.assignments)) {
+      submissionsByAssignment.set(
+        Number(assignment.assignmentid || 0),
+        asObjects(assignment.submissions),
+      );
+    }
+  }
+
+  const rawRows = context.assignments.flatMap((assignment) =>
+    (submissionsByAssignment.get(assignment.assignment_id) || [])
+      .map((submission) => ({ assignment, submission }))
+  );
+  const moodleUserIds = [...new Set(rawRows.map((item) => Number(item.submission.userid || 0)).filter(Boolean))];
+  let linkedMembers: JsonObject[] = [];
+
+  if (moodleUserIds.length) {
+    const { data, error } = await admin
+      .from("integrantes")
+      .select("id,nombres,apellidos,documento,cedula,correo,moodle_user_id")
+      .in("moodle_user_id", moodleUserIds);
+    if (error) throw new Error(`No se pudieron relacionar los integrantes: ${error.message}`);
+    linkedMembers = data || [];
+  }
+
+  const memberMap = new Map(linkedMembers.map((member) => [Number(member.moodle_user_id || 0), member]));
+  const moodleLookupIds = moodleUserIds.filter((moodleUserId) => {
+    const member = memberMap.get(moodleUserId);
+    if (!member) return true;
+    const memberName = `${String(member.nombres || "")} ${String(member.apellidos || "")}`.trim();
+    return !memberName || !String(member.correo || "").trim();
+  });
+  let moodleUsers: JsonObject[] = [];
+  try {
+    moodleUsers = await getMoodleUsersByIds(moodleLookupIds);
+  } catch (error) {
+    const message = cleanError(error);
+    console.warn("No se pudieron completar los datos de usuarios desde Moodle:", message);
+    warnings.push({ warningcode: "moodle_user_lookup_failed", message });
+  }
+  const moodleUserMap = new Map(moodleUsers.map((user) => [Number(user.id || 0), user]));
+
+  const rows = rawRows
+    .map(({ assignment, submission }): EvaluationRow | null => {
+      const files = getSubmissionFiles(submission);
+      const onlineText = getSubmissionOnlineText(submission);
+      if (!files.length && !onlineText) return null;
+      const moodleUserId = Number(submission.userid || 0);
+      if (!moodleUserId) return null;
+      const member = memberMap.get(moodleUserId) || null;
+      const moodleUser = moodleUserMap.get(moodleUserId) || null;
+      const gradingstatus = String(submission.gradingstatus || "notgraded").toLowerCase();
+      const memberName = `${String(member?.nombres || "")} ${String(member?.apellidos || "")}`.trim();
+      const moodleName = String(moodleUser?.fullname || "").trim() ||
+        `${String(moodleUser?.firstname || "")} ${String(moodleUser?.lastname || "")}`.trim();
+      return {
+        submission_id: Number(submission.id || 0),
+        moodle_user_id: moodleUserId,
+        attemptnumber: Number(submission.attemptnumber || 0),
+        timecreated: Number(submission.timecreated || 0),
+        timemodified: Number(submission.timemodified || 0),
+        submission_status: String(submission.status || ""),
+        gradingstatus,
+        processed: gradingstatus === "graded",
+        course: {
+          id: assignment.course_id,
+          fullname: assignment.course_name,
+          shortname: assignment.course_shortname,
+        },
+        assignment: {
+          id: assignment.assignment_id,
+          cmid: assignment.assignment_cmid,
+          name: assignment.assignment_name,
+          grade: assignment.grade,
+          markingworkflow: assignment.markingworkflow,
+          teamsubmission: assignment.teamsubmission,
+        },
+        student: {
+          fullname: memberName || moodleName || `Usuario Moodle #${moodleUserId}`,
+          email: String(member?.correo || moodleUser?.email || "").trim(),
+          idnumber: String(member?.documento || member?.cedula || moodleUser?.idnumber || "").trim(),
+        },
+        member: member
+          ? {
+            id: Number(member.id || 0),
+            documento: String(member.documento || member.cedula || ""),
+          }
+          : null,
+        files,
+        online_text: onlineText,
+      };
+    })
+    .filter((row): row is EvaluationRow => row !== null)
+    .sort((left, right) => right.timemodified - left.timemodified);
+
+  return { ...context, warnings, rows };
+}
+
+async function getEvaluationTarget(assignmentId: number, submissionId: number): Promise<{
+  assignment: PaymentAssignment;
+  submission: JsonObject;
+  files: PaymentFile[];
+}> {
+  const context = await getEvaluationAssignments();
+  const assignment = context.assignments.find((item) => item.assignment_id === assignmentId);
+  if (!assignment) throw new Error("La tarea ya no está disponible para evaluación.");
+
+  const response = asObject(await callMoodle("mod_assign_get_submissions", {
+    "assignmentids[0]": assignmentId,
+    status: "",
+    since: 0,
+    before: 0,
+  }));
+  const remoteAssignment = asObjects(response.assignments)
+    .find((item) => Number(item.assignmentid || 0) === assignmentId);
+  const submission = asObjects(remoteAssignment?.submissions)
+    .find((item) => Number(item.id || 0) === submissionId);
+  if (!submission) throw new Error("La entrega ya no está disponible en Moodle.");
+  return { assignment, submission, files: getSubmissionFiles(submission) };
 }
 
 async function getPaymentSnapshot(admin: SupabaseAdminClient): Promise<PaymentSnapshot> {
@@ -490,15 +709,27 @@ function publicPaymentRow(row: PaymentRow): JsonObject {
   };
 }
 
-async function downloadPaymentFile(file: PaymentFile): Promise<{ data: ArrayBuffer; mimetype: string }> {
+function publicEvaluationRow(row: EvaluationRow): JsonObject {
+  return {
+    ...row,
+    files: row.files.map((file, index) => ({
+      index,
+      filename: file.filename,
+      mimetype: file.mimetype,
+      filesize: file.filesize,
+    })),
+  };
+}
+
+async function downloadMoodleFile(file: PaymentFile): Promise<{ data: ArrayBuffer; mimetype: string }> {
   if (file.filesize > MAX_PAYMENT_FILE_BYTES) {
-    throw new Error("El comprobante supera el máximo de 15 MB permitido para la vista previa.");
+    throw new Error("El archivo supera el máximo de 15 MB permitido para la vista previa.");
   }
 
   const baseUrl = new URL(requiredSecret("MOODLE_BASE_URL").replace(/\/+$/, ""));
   const fileUrl = new URL(file.fileurl);
   if (fileUrl.origin !== baseUrl.origin || !fileUrl.pathname.includes("/webservice/pluginfile.php/")) {
-    throw new Error("La dirección del comprobante no pertenece al Moodle autorizado.");
+    throw new Error("La dirección del archivo no pertenece al Moodle autorizado.");
   }
   fileUrl.searchParams.set("token", requiredSecret("MOODLE_TOKEN"));
 
@@ -506,7 +737,7 @@ async function downloadPaymentFile(file: PaymentFile): Promise<{ data: ArrayBuff
   if (!response.ok) throw new Error(`No se pudo descargar el comprobante (${response.status}).`);
   const data = await response.arrayBuffer();
   if (data.byteLength > MAX_PAYMENT_FILE_BYTES) {
-    throw new Error("El comprobante descargado supera el máximo de 15 MB.");
+    throw new Error("El archivo descargado supera el máximo de 15 MB.");
   }
 
   const responseType = response.headers.get("content-type")?.split(";")[0]?.trim() || "";
@@ -522,7 +753,7 @@ async function audit(
   admin: SupabaseAdminClient,
   values: {
     admin_user_id: string;
-    accion: "CREAR_VINCULAR_USUARIO" | "MATRICULAR" | "DESMATRICULAR" | "APROBAR_PAGO";
+    accion: "CREAR_VINCULAR_USUARIO" | "MATRICULAR" | "DESMATRICULAR" | "APROBAR_PAGO" | "CALIFICAR_TAREA";
     integrante_id?: number | null;
     moodle_user_id?: number | null;
     moodle_course_id?: number | null;
@@ -673,6 +904,154 @@ Deno.serve(async (req: Request) => {
       return json(req, { ok: true, users, total: users.length });
     }
 
+    if (action === "evaluation_submissions") {
+      const snapshot = await getEvaluationSnapshot(admin);
+      const pending = snapshot.rows.filter((row) => !row.processed).length;
+      const evaluationCourses = [...new Map(snapshot.assignments.map((assignment) => [
+        assignment.course_id,
+        {
+          id: assignment.course_id,
+          fullname: assignment.course_name,
+          shortname: assignment.course_shortname,
+        },
+      ])).values()];
+      return json(req, {
+        ok: true,
+        courses: evaluationCourses,
+        assignments: snapshot.assignments.map((assignment) => ({
+          course_id: assignment.course_id,
+          assignment_id: assignment.assignment_id,
+          assignment_cmid: assignment.assignment_cmid,
+          assignment_name: assignment.assignment_name,
+          grade: assignment.grade,
+          teamsubmission: assignment.teamsubmission,
+        })),
+        warnings: snapshot.warnings,
+        summary: {
+          total: snapshot.rows.length,
+          pending,
+          processed: snapshot.rows.length - pending,
+          courses: evaluationCourses.length,
+          assignments: snapshot.assignments.length,
+        },
+        submissions: snapshot.rows.map(publicEvaluationRow),
+      });
+    }
+
+    if (action === "evaluation_file") {
+      const assignmentId = positiveInteger(body.assignment_id, "La tarea");
+      const submissionId = positiveInteger(body.submission_id, "La entrega");
+      const fileIndex = nonNegativeInteger(body.file_index, "El archivo");
+      const target = await getEvaluationTarget(assignmentId, submissionId);
+      const file = target.files[fileIndex];
+      if (!file) throw new Error("El archivo solicitado no existe.");
+      const downloaded = await downloadMoodleFile(file);
+      return new Response(downloaded.data, {
+        status: 200,
+        headers: {
+          ...corsHeaders(req),
+          "Content-Type": downloaded.mimetype,
+          "Content-Length": String(downloaded.data.byteLength),
+          "Content-Disposition": `inline; filename*=UTF-8''${encodeURIComponent(file.filename)}`,
+          "Cache-Control": "no-store",
+          "X-Content-Type-Options": "nosniff",
+        },
+      });
+    }
+
+    if (action === "grade_submission") {
+      const assignmentId = positiveInteger(body.assignment_id, "La tarea");
+      const submissionId = positiveInteger(body.submission_id, "La entrega");
+      const grade = Number(body.grade);
+      const feedback = String(body.feedback || "").trim();
+      if (!Number.isFinite(grade)) throw new Error("La calificación no es válida.");
+      if (feedback.length > MAX_FEEDBACK_LENGTH) {
+        throw new Error(`El comentario no puede superar ${MAX_FEEDBACK_LENGTH} caracteres.`);
+      }
+
+      const target = await getEvaluationTarget(assignmentId, submissionId);
+      const maximumGrade = Number(target.assignment.grade || 0);
+      if (maximumGrade <= 0) {
+        throw new Error("Esta tarea usa una escala o un método de calificación que debe evaluarse directamente en Moodle.");
+      }
+      if (maximumGrade !== 100) {
+        throw new Error("La tarea debe estar configurada sobre 100 puntos para usar este centro de evaluación.");
+      }
+      if (![0, 50, 80, 100].includes(grade)) {
+        throw new Error("La calificación debe ser 100, 80, 50 o 0.");
+      }
+
+      const moodleUserId = positiveInteger(target.submission.userid, "El usuario Moodle");
+      const integranteId = await admin
+        .from("integrantes")
+        .select("id")
+        .eq("moodle_user_id", moodleUserId)
+        .maybeSingle()
+        .then(({ data }) => Number(data?.id || 0) || null);
+      const gradeParameters: Record<string, MoodleParameter> = {
+        assignmentid: assignmentId,
+        userid: moodleUserId,
+        grade,
+        attemptnumber: Number(target.submission.attemptnumber || 0),
+        addattempt: 0,
+        workflowstate: target.assignment.markingworkflow === 1 ? "released" : "",
+        applytoall: 0,
+      };
+      if (feedback) {
+        gradeParameters["plugindata[assignfeedbackcomments_editor][text]"] = feedback;
+        gradeParameters["plugindata[assignfeedbackcomments_editor][format]"] = 2;
+      }
+
+      try {
+        await callMoodle("mod_assign_save_grade", gradeParameters);
+        await audit(admin, {
+          admin_user_id: adminUserId,
+          accion: "CALIFICAR_TAREA",
+          integrante_id: integranteId,
+          moodle_user_id: moodleUserId,
+          moodle_course_id: target.assignment.course_id,
+          detalle: {
+            assignment_id: assignmentId,
+            assignment_cmid: target.assignment.assignment_cmid,
+            assignment_name: target.assignment.assignment_name,
+            course_name: target.assignment.course_name,
+            submission_id: submissionId,
+            attemptnumber: Number(target.submission.attemptnumber || 0),
+            grade,
+            maximum_grade: maximumGrade,
+            feedback_included: Boolean(feedback),
+            files: target.files.map((file) => file.filename),
+          },
+          resultado: "OK",
+        });
+        return json(req, {
+          ok: true,
+          graded: true,
+          moodle_user_id: moodleUserId,
+          grade,
+          maximum_grade: maximumGrade,
+        });
+      } catch (error) {
+        const message = cleanError(error);
+        await audit(admin, {
+          admin_user_id: adminUserId,
+          accion: "CALIFICAR_TAREA",
+          integrante_id: integranteId,
+          moodle_user_id: moodleUserId,
+          moodle_course_id: target.assignment.course_id,
+          detalle: {
+            assignment_id: assignmentId,
+            submission_id: submissionId,
+            grade,
+            maximum_grade: maximumGrade,
+          },
+          resultado: "ERROR",
+          error: message,
+        });
+        throw new Error(message);
+      }
+    }
+
     if (action === "payment_submissions") {
       const snapshot = await getPaymentSnapshot(admin);
       const pending = snapshot.rows.filter((row) => !row.processed).length;
@@ -716,7 +1095,7 @@ Deno.serve(async (req: Request) => {
       if (!payment) throw new Error("La entrega ya no está disponible en la tarea de pago.");
       const file = payment.files[fileIndex];
       if (!file) throw new Error("El comprobante solicitado no existe.");
-      const downloaded = await downloadPaymentFile(file);
+      const downloaded = await downloadMoodleFile(file);
       return new Response(downloaded.data, {
         status: 200,
         headers: {
