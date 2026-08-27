@@ -40,6 +40,8 @@ type PaymentRow = {
   files: PaymentFile[];
 };
 
+const BULK_UNENROL_FUNCTION = "local_movidasst_bulk_unenrol_users";
+
 type PaymentSnapshot = {
   assignments: PaymentAssignment[];
   courses_without_payment: JsonObject[];
@@ -629,19 +631,65 @@ async function bulkUnenrolStudents(
   const succeeded: JsonObject[] = [];
   const failed: JsonObject[] = [];
 
-  for (const batch of chunks(targets, 25)) {
-    const parameters: Record<string, MoodleParameter> = {};
+  const siteInfo = asObject(await callMoodle("core_webservice_get_site_info"));
+  const availableFunctions = new Set(
+    asObjects(siteInfo.functions).map((item) => String(item.name || "")),
+  );
+  if (!availableFunctions.has(BULK_UNENROL_FUNCTION)) {
+    throw new Error(
+      "La desmatriculación masiva completa aún no está habilitada en Moodle. " +
+        `Instala Integraciones Movida SST y agrega ${BULK_UNENROL_FUNCTION} al servicio externo de Gestión.`,
+    );
+  }
+
+  const pluginResults = new Map<number, JsonObject>();
+  const requestErrors = new Map<number, string>();
+  for (const batch of chunks(targets, 100)) {
+    const parameters: Record<string, MoodleParameter> = { courseid: courseId };
     batch.forEach((student, index) => {
-      parameters[`enrolments[${index}][userid]`] = Number(student.id || 0);
-      parameters[`enrolments[${index}][courseid]`] = courseId;
+      parameters[`userids[${index}]`] = Number(student.id || 0);
     });
     try {
-      await callMoodle("enrol_manual_unenrol_users", parameters);
-      succeeded.push(...batch);
+      const response = asObject(await callMoodle(BULK_UNENROL_FUNCTION, parameters));
+      for (const result of asObjects(response.results)) {
+        const userId = Number(result.userid || 0);
+        if (userId) pluginResults.set(userId, result);
+      }
     } catch (error) {
       const message = cleanError(error);
-      failed.push(...batch.map((student) => ({ ...student, error: message })));
+      for (const student of batch) {
+        const userId = Number(student.id || 0);
+        if (userId) requestErrors.set(userId, message);
+      }
     }
+  }
+
+  // Moodle's manual unenrolment API can return success even when a self-enrolment remains.
+  // Re-read the course and only report success after the student has actually disappeared.
+  const remainingIds = new Set(
+    (await getCourseStudents(courseId)).map((student) => Number(student.id || 0)).filter(Boolean),
+  );
+  for (const student of targets) {
+    const userId = Number(student.id || 0);
+    const result = pluginResults.get(userId);
+    const status = String(result?.status || "");
+    const requestError = requestErrors.get(userId);
+    const verifiedRemoved = !remainingIds.has(userId);
+    if (!requestError && verifiedRemoved && ["unenrolled", "not_enrolled"].includes(status)) {
+      succeeded.push(student);
+      continue;
+    }
+    const pluginMessage = String(result?.message || "").trim();
+    failed.push({
+      ...student,
+      error: requestError || pluginMessage ||
+        (verifiedRemoved
+          ? "Moodle no confirmó que todas las matrículas del usuario fueran eliminadas."
+          : "El usuario todavía aparece matriculado después de la operación."),
+      status: status || "error",
+      remaining_methods: (Array.isArray(result?.remainingmethods) ? result.remainingmethods : [])
+        .map((item) => String(item || "")),
+    });
   }
 
   const allUserIds = targets.map((student) => Number(student.id || 0)).filter(Boolean);
@@ -1280,6 +1328,7 @@ Deno.serve(async (req: Request) => {
             academic_read: academicReadFunctions.every((name) => availableFunctions.has(name)),
             academic_missing: academicReadFunctions.filter((name) => !availableFunctions.has(name)),
             duplicate_course: availableFunctions.has("core_course_duplicate_course"),
+            bulk_unenrol_all_methods: availableFunctions.has(BULK_UNENROL_FUNCTION),
           },
         },
         courses,
