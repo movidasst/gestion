@@ -45,8 +45,10 @@ const COMPANY_ENROL_FUNCTIONS = [
   "core_user_get_users_by_field",
   "core_user_create_users",
   "enrol_manual_enrol_users",
+  "core_course_update_courses",
   "core_group_get_course_groups",
   "core_group_create_groups",
+  "core_group_update_groups",
   "core_group_add_group_members",
   "core_group_get_group_members",
 ];
@@ -307,6 +309,8 @@ function normalizeCourse(course: unknown): JsonObject {
     progress: item.progress == null ? null : Number(item.progress),
     completed: item.completed === true,
     enablecompletion: Number(item.enablecompletion || 0),
+    groupmode: Number(item.groupmode || 0),
+    groupmodeforce: Number(item.groupmodeforce || 0),
   };
 }
 
@@ -922,6 +926,33 @@ async function getCompanyParticipants(admin: SupabaseAdminClient, companyCourseI
   return data || [];
 }
 
+async function configureCompanyCourseGroupMode(
+  context: Awaited<ReturnType<typeof getCompanyCourseContext>>,
+): Promise<JsonObject> {
+  const courseId = positiveInteger(context.companyCourse.moodle_course_id, "El curso Moodle");
+  const sharedCourse = String(context.companyCourse.modalidad || "compartido") === "compartido";
+  const force = sharedCourse ? 1 : 0;
+  const result = asObject(await callMoodle("core_course_update_courses", {
+    "courses[0][id]": courseId,
+    "courses[0][groupmode]": 1,
+    "courses[0][groupmodeforce]": force,
+  }));
+  const warnings = asObjects(result.warnings);
+  if (warnings.length) {
+    throw new Error(
+      `Moodle no pudo configurar los grupos separados: ${warnings.map((warning) => String(warning.message || warning.warningcode || "advertencia")).join(" · ")}`,
+    );
+  }
+  return {
+    groupmode: 1,
+    groupmodeforce: force,
+    label: force ? "Grupos separados forzados" : "Grupos separados",
+    reason: sharedCourse
+      ? "El curso es compartido por varias empresas; todas las actividades usarán grupos separados."
+      : "El curso es exclusivo; se mantiene la separación sin forzar todas las actividades.",
+  };
+}
+
 async function getOrCreateCompanyGroup(
   admin: SupabaseAdminClient,
   context: Awaited<ReturnType<typeof getCompanyCourseContext>>,
@@ -929,7 +960,7 @@ async function getOrCreateCompanyGroup(
   const courseId = Number(context.companyCourse.moodle_course_id || 0);
   const currentGroupId = Number(context.companyCourse.moodle_group_id || 0);
   const groupName = cleanText(
-    context.companyCourse.moodle_group_name || `${context.company.nombre} · ${context.contract.codigo}`,
+    `${context.company.nombre} · ${context.contract.codigo}`,
     254,
   );
   const groupIdNumber = cleanText(
@@ -956,6 +987,18 @@ async function getOrCreateCompanyGroup(
       "groups[0][participation]": 1,
     };
     group = asObjects(await callMoodle("core_group_create_groups", parameters))[0];
+  } else if (
+    String(group.name || "").trim() !== groupName ||
+    String(group.idnumber || "").trim() !== groupIdNumber
+  ) {
+    await callMoodle("core_group_update_groups", {
+      "groups[0][id]": Number(group.id || 0),
+      "groups[0][name]": groupName,
+      "groups[0][description]": `Empresa: ${cleanText(context.company.nombre, 180)} · Contrato: ${cleanText(context.contract.codigo, 40)}`,
+      "groups[0][descriptionformat]": 1,
+      "groups[0][idnumber]": groupIdNumber,
+    });
+    group = { ...group, name: groupName, idnumber: groupIdNumber };
   }
   const groupId = positiveInteger(group?.id, "El grupo Moodle");
   const { error } = await admin
@@ -1079,6 +1122,7 @@ async function enrolCompanyCourse(
     throw new Error(`Faltan funciones en el servicio externo de Moodle: ${missing.join(", ")}.`);
   }
 
+  const groupConfiguration = await configureCompanyCourseGroupMode(context);
   const group = await getOrCreateCompanyGroup(admin, context);
   const courseId = Number(context.companyCourse.moodle_course_id || 0);
   const groupId = Number(group.id || 0);
@@ -1167,6 +1211,8 @@ async function enrolCompanyCourse(
         contrato_id: context.contract.id,
         curso_empresa_id: context.companyCourse.id,
         grupo_id: groupId,
+        modo_grupo: groupConfiguration.groupmode,
+        modo_grupo_forzado: groupConfiguration.groupmodeforce,
         participante_id: participantId,
       },
       resultado: failure ? "ERROR" : "OK",
@@ -1189,6 +1235,7 @@ async function enrolCompanyCourse(
     contract: context.contract,
     company_course: { ...context.companyCourse, moodle_group_id: groupId, moodle_group_name: group.name, estado: state },
     group,
+    group_configuration: groupConfiguration,
     requested: participants.length,
     enrolled: succeeded.length,
     accounts_created: succeeded.filter((participant) => participant.account_created === true).length,
@@ -2264,14 +2311,25 @@ Deno.serve(async (req: Request) => {
     if (action === "company_course_detail") {
       const companyCourseId = optionalUuid(body.company_course_id, "El curso empresarial");
       if (!companyCourseId) throw new Error("Selecciona el curso empresarial.");
-      const [context, participants] = await Promise.all([
+      const [context, participants, moodleCourses] = await Promise.all([
         getCompanyCourseContext(admin, companyCourseId),
         getCompanyParticipants(admin, companyCourseId),
+        getCourses(),
       ]);
       const active = participants.filter((participant) => !["retirado", "reemplazado"].includes(String(participant.estado || "")));
+      const moodleCourse = moodleCourses.find((course) =>
+        Number(course.id || 0) === Number(context.companyCourse.moodle_course_id || 0)
+      ) || null;
       return json(req, {
         ok: true,
         ...context,
+        moodle_course: moodleCourse,
+        group_configuration: {
+          groupmode: Number(moodleCourse?.groupmode || 0),
+          groupmodeforce: Number(moodleCourse?.groupmodeforce || 0),
+          configured: Number(moodleCourse?.groupmode || 0) === 1,
+          forced: Number(moodleCourse?.groupmodeforce || 0) === 1,
+        },
         participants,
         summary: {
           seats: Number(context.companyCourse.cupos_contratados || 0),
@@ -2320,6 +2378,13 @@ Deno.serve(async (req: Request) => {
           accounts_to_resolve: participants.filter((participant) => !Number(participant.moodle_user_id || 0)).length,
           existing_accounts: participants.filter((participant) => Number(participant.moodle_user_id || 0) > 0).length,
           group_exists: Number(context.companyCourse.moodle_group_id || 0) > 0,
+          group_configuration: {
+            groupmode: 1,
+            groupmodeforce: String(context.companyCourse.modalidad || "compartido") === "compartido" ? 1 : 0,
+            label: String(context.companyCourse.modalidad || "compartido") === "compartido"
+              ? "Grupos separados forzados"
+              : "Grupos separados",
+          },
           capabilities: { ready: missing.length === 0, missing },
           sample: participants.slice(0, 20).map((participant) => ({
             fullname: `${String(participant.nombres || "")} ${String(participant.apellidos || "")}`.trim(),
