@@ -1,0 +1,50 @@
+.movidaattendance-card {
+    max-width: 760px;
+    margin: 1.5rem auto;
+    padding: 1.5rem;
+    border: 1px solid #d7e7ea;
+    border-radius: 1.25rem;
+    background: linear-gradient(145deg, #ffffff 0%, #f1fbfb 100%);
+    box-shadow: 0 12px 32px rgba(0, 32, 91, .08);
+    text-align: center;
+}
+.movidaattendance-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: .4rem;
+    padding: .4rem .8rem;
+    border-radius: 999px;
+    background: #e6f7f6;
+    color: #006d75;
+    font-weight: 700;
+}
+.movidaattendance-badge.is-late { background: #fff2cc; color: #785700; }
+.movidaattendance-badge.is-closed { background: #fbe9ec; color: #9b2335; }
+.movidaattendance-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 3.4rem;
+    margin-top: 1.25rem;
+    padding: .8rem 1.6rem;
+    border: 0;
+    border-radius: .9rem;
+    background: #007b85;
+    color: #fff;
+    font-size: 1.05rem;
+    font-weight: 800;
+    box-shadow: 0 8px 20px rgba(0, 123, 133, .25);
+}
+.movidaattendance-button:hover,
+.movidaattendance-button:focus { background: #005f67; color: #fff; }
+.movidaattendance-confirmation { margin-top: 1rem; color: #17643a; font-weight: 700; }
+.movidaattendance-window { margin: .9rem 0 0; color: #526978; }
+.movidaattendance-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .75rem; margin: 1rem 0; }
+.movidaattendance-stat { padding: .85rem; border: 1px solid #dbe8eb; border-radius: .85rem; background: #fff; }
+.movidaattendance-stat strong { display: block; color: #00205b; font-size: 1.3rem; }
+@media (max-width: 640px) {
+    .movidaattendance-card { padding: 1rem; }
+    .movidaattendance-button { width: 100%; }
+    .movidaattendance-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+

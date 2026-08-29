@@ -41,6 +41,7 @@ type PaymentRow = {
 };
 
 const BULK_UNENROL_FUNCTION = "local_movidasst_bulk_unenrol_users";
+const ATTENDANCE_REPORT_FUNCTION = "mod_movidaattendance_get_course_report";
 const COMPANY_ENROL_FUNCTIONS = [
   "core_user_get_users_by_field",
   "core_user_create_users",
@@ -249,12 +250,12 @@ function slug(value: unknown, maxLength = 40): string {
     .slice(0, maxLength) || "EMPRESA";
 }
 
-async function callMoodle(
+async function callMoodleWithToken(
   functionName: string,
-  parameters: Record<string, MoodleParameter> = {},
+  parameters: Record<string, MoodleParameter>,
+  token: string,
 ): Promise<unknown> {
   const baseUrl = requiredSecret("MOODLE_BASE_URL").replace(/\/+$/, "");
-  const token = requiredSecret("MOODLE_TOKEN");
   const form = new URLSearchParams({
     wstoken: token,
     wsfunction: functionName,
@@ -294,6 +295,21 @@ async function callMoodle(
   }
 
   return payload;
+}
+
+async function callMoodle(
+  functionName: string,
+  parameters: Record<string, MoodleParameter> = {},
+): Promise<unknown> {
+  return callMoodleWithToken(functionName, parameters, requiredSecret("MOODLE_TOKEN"));
+}
+
+async function callMoodleRead(
+  functionName: string,
+  parameters: Record<string, MoodleParameter> = {},
+): Promise<unknown> {
+  const token = Deno.env.get("MOODLE_LECTURA_TOKEN")?.trim() || requiredSecret("MOODLE_TOKEN");
+  return callMoodleWithToken(functionName, parameters, token);
 }
 
 function normalizeCourse(course: unknown): JsonObject {
@@ -1494,6 +1510,41 @@ async function getCompanyReportData(
       };
       const enrolledStudents = await getCourseStudents(Number(companyCourse.moodle_course_id || 0));
       const studentMap = new Map(enrolledStudents.map((student) => [Number(student.id || 0), student]));
+      let attendanceReport: JsonObject | null = null;
+      let attendanceError = "";
+      try {
+        attendanceReport = asObject(await callMoodleRead(ATTENDANCE_REPORT_FUNCTION, {
+          courseid: Number(companyCourse.moodle_course_id || 0),
+          groupid: Number(companyCourse.moodle_group_id || 0),
+        }));
+      } catch (error) {
+        attendanceError = cleanError(error);
+      }
+      const attendanceAvailable = Boolean(attendanceReport && !attendanceError);
+      const attendanceUserMap = new Map(
+        asObjects(attendanceReport?.users).map((user) => [Number(user.userid || 0), user]),
+      );
+      const attendanceForUser = (moodleUserId: number): JsonObject => {
+        const raw = attendanceUserMap.get(moodleUserId) || {};
+        return attendanceAvailable
+          ? {
+            available: true,
+            scheduled: Number(raw.scheduled || 0),
+            expected: Number(raw.expected || 0),
+            registered: Number(raw.registered || 0),
+            present: Number(raw.present || 0),
+            late: Number(raw.late || 0),
+            missed: Number(raw.missed || 0),
+            pending: Number(raw.pending || 0),
+            upcoming: Number(raw.upcoming || 0),
+            percentage: Number(raw.percentage || 0),
+            lastcheckin: Number(raw.lastcheckin || 0),
+          }
+          : {
+            available: false,
+            error: attendanceError || "El reporte de asistencia no está disponible.",
+          };
+      };
       const reportStudents: JsonObject[] = [];
       for (const batch of chunks(courseParticipants, 5)) {
         const detailed = await Promise.all(batch.map(async (participant) => {
@@ -1513,6 +1564,7 @@ async function getCompanyReportData(
               progress: null,
               activities_pending: null,
               grade: gradeSummary({}),
+              attendance: attendanceForUser(moodleUserId),
               alerts: [{ code: "not_enrolled", severity: "danger", message: "No aparece matriculado en Moodle" }],
               certificate_status: "pendiente",
             };
@@ -1525,6 +1577,7 @@ async function getCompanyReportData(
             email: participant.correo,
             document: participant.documento,
             enrolled: true,
+            attendance: attendanceForUser(moodleUserId),
             certificate_status: detail.completed === true ? "elegible" : "pendiente",
           };
         }));
@@ -1538,6 +1591,12 @@ async function getCompanyReportData(
         .filter((student) => asObject(student.grade).percentage != null)
         .map((student) => Number(asObject(student.grade).percentage))
         .filter(Number.isFinite);
+      const attendanceRows = reportStudents
+        .filter((student) => student.enrolled === true)
+        .map((student) => asObject(student.attendance))
+        .filter((attendance) => attendance.available === true);
+      const attendanceExpected = attendanceRows.reduce((sum, attendance) => sum + Number(attendance.expected || 0), 0);
+      const attendanceRegistered = attendanceRows.reduce((sum, attendance) => sum + Number(attendance.registered || 0), 0);
       courseRows.push({
         company_course: companyCourse,
         moodle_course: moodleCourse,
@@ -1555,6 +1614,21 @@ async function getCompanyReportData(
           average_grade: numericGrades.length ? Math.round(numericGrades.reduce((sum, value) => sum + value, 0) * 10 / numericGrades.length) / 10 : null,
           pending_activities: reportStudents.reduce((sum, student) => sum + Number(student.activities_pending || 0), 0),
           alerts: reportStudents.reduce((sum, student) => sum + asObjects(student.alerts).length, 0),
+          attendance_available: attendanceAvailable,
+          attendance_error: attendanceAvailable ? null : attendanceError,
+          attendance_activities: Number(asObject(attendanceReport?.summary).activities || 0),
+          attendance_expected: attendanceExpected,
+          attendance_registered: attendanceRegistered,
+          attendance_present: attendanceRows.reduce((sum, attendance) => sum + Number(attendance.present || 0), 0),
+          attendance_late: attendanceRows.reduce((sum, attendance) => sum + Number(attendance.late || 0), 0),
+          attendance_missed: attendanceRows.reduce((sum, attendance) => sum + Number(attendance.missed || 0), 0),
+          attendance_pending: attendanceRows.reduce((sum, attendance) => sum + Number(attendance.pending || 0), 0),
+          attendance_average: attendanceExpected
+            ? Math.round(attendanceRegistered * 1000 / attendanceExpected) / 10
+            : null,
+          attendance_last_checkin: attendanceRows.length
+            ? Math.max(...attendanceRows.map((attendance) => Number(attendance.lastcheckin || 0)))
+            : 0,
         },
       });
     } catch (error) {
@@ -1572,6 +1646,18 @@ async function getCompanyReportData(
     .filter((student) => asObject(student.grade).percentage != null)
     .map((student) => Number(asObject(student.grade).percentage))
     .filter(Number.isFinite);
+  const allAttendanceRows = allStudents
+    .filter((student) => student.enrolled === true)
+    .map((student) => asObject(student.attendance))
+    .filter((attendance) => attendance.available === true);
+  const allAttendanceExpected = allAttendanceRows.reduce(
+    (sum, attendance) => sum + Number(attendance.expected || 0),
+    0,
+  );
+  const allAttendanceRegistered = allAttendanceRows.reduce(
+    (sum, attendance) => sum + Number(attendance.registered || 0),
+    0,
+  );
   const report = {
     generated_at: new Date().toISOString(),
     inactive_days: inactiveDays,
@@ -1593,6 +1679,25 @@ async function getCompanyReportData(
       average_grade: gradeValues.length ? Math.round(gradeValues.reduce((sum, value) => sum + value, 0) * 10 / gradeValues.length) / 10 : null,
       pending_activities: allStudents.reduce((sum, student) => sum + Number(student.activities_pending || 0), 0),
       alerts: allStudents.reduce((sum, student) => sum + asObjects(student.alerts).length, 0),
+      attendance_readable_courses: successfulCourses.filter(
+        (course) => asObject(course.summary).attendance_available === true,
+      ).length,
+      attendance_activities: successfulCourses.reduce(
+        (sum, course) => sum + Number(asObject(course.summary).attendance_activities || 0),
+        0,
+      ),
+      attendance_expected: allAttendanceExpected,
+      attendance_registered: allAttendanceRegistered,
+      attendance_present: allAttendanceRows.reduce((sum, attendance) => sum + Number(attendance.present || 0), 0),
+      attendance_late: allAttendanceRows.reduce((sum, attendance) => sum + Number(attendance.late || 0), 0),
+      attendance_missed: allAttendanceRows.reduce((sum, attendance) => sum + Number(attendance.missed || 0), 0),
+      attendance_pending: allAttendanceRows.reduce((sum, attendance) => sum + Number(attendance.pending || 0), 0),
+      attendance_average: allAttendanceExpected
+        ? Math.round(allAttendanceRegistered * 1000 / allAttendanceExpected) / 10
+        : null,
+      attendance_last_checkin: allAttendanceRows.length
+        ? Math.max(...allAttendanceRows.map((attendance) => Number(attendance.lastcheckin || 0)))
+        : 0,
     },
   };
   await audit(admin, {
