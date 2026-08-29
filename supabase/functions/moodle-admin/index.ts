@@ -41,6 +41,17 @@ type PaymentRow = {
 };
 
 const BULK_UNENROL_FUNCTION = "local_movidasst_bulk_unenrol_users";
+const COMPANY_ENROL_FUNCTIONS = [
+  "core_user_get_users_by_field",
+  "core_user_create_users",
+  "enrol_manual_enrol_users",
+  "core_group_get_course_groups",
+  "core_group_create_groups",
+  "core_group_add_group_members",
+  "core_group_get_group_members",
+];
+const MAX_COMPANY_IMPORT = 500;
+const MAX_COMPANY_REPORT_PARTICIPANTS = 500;
 
 type PaymentSnapshot = {
   assignments: PaymentAssignment[];
@@ -180,6 +191,60 @@ function normalizeSearch(value: unknown): string {
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 80);
+}
+
+function cleanText(value: unknown, maxLength = 500): string {
+  return String(value ?? "")
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maxLength);
+}
+
+function normalizeEmail(value: unknown): string {
+  return cleanText(value, 254).toLocaleLowerCase("es");
+}
+
+function normalizeDocument(value: unknown): string {
+  return cleanText(value, 80).replace(/\s+/g, "").toLocaleUpperCase("es");
+}
+
+function validEmail(value: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+
+function optionalUuid(value: unknown, label: string): string | null {
+  const normalized = cleanText(value, 36).toLowerCase();
+  if (!normalized) return null;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(normalized)) {
+    throw new Error(`${label} no es válido.`);
+  }
+  return normalized;
+}
+
+function optionalIsoDate(value: unknown, label: string): string | null {
+  const normalized = cleanText(value, 10);
+  if (!normalized) return null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized) || Number.isNaN(Date.parse(`${normalized}T00:00:00Z`))) {
+    throw new Error(`${label} no es válida.`);
+  }
+  return normalized;
+}
+
+function dateToTimestamp(value: unknown, endOfDay = false): number {
+  const date = optionalIsoDate(value, "La fecha");
+  if (!date) return 0;
+  return Math.floor(Date.parse(`${date}T${endOfDay ? "23:59:59" : "00:00:00"}Z`) / 1000);
+}
+
+function slug(value: unknown, maxLength = 40): string {
+  return cleanText(value, 160)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, maxLength) || "EMPRESA";
 }
 
 async function callMoodle(
@@ -799,6 +864,700 @@ function chunks<T>(items: T[], size: number): T[][] {
   return result;
 }
 
+async function getAvailableMoodleFunctions(): Promise<Set<string>> {
+  const siteInfo = asObject(await callMoodle("core_webservice_get_site_info"));
+  return new Set(asObjects(siteInfo.functions).map((item) => String(item.name || "")));
+}
+
+async function getMoodleUsersByField(field: "id" | "idnumber" | "email", values: Array<string | number>): Promise<JsonObject[]> {
+  const unique = [...new Set(values.map((value) => String(value).trim()).filter(Boolean))];
+  if (!unique.length) return [];
+  const responses: unknown[] = [];
+  for (const valueBatch of chunks(unique, 100)) {
+    const parameters: Record<string, MoodleParameter> = { field };
+    valueBatch.forEach((value, index) => {
+      parameters[`values[${index}]`] = value;
+    });
+    responses.push(await callMoodle("core_user_get_users_by_field", parameters));
+  }
+  return responses.flatMap(asObjects);
+}
+
+async function getCompanyCourseContext(admin: SupabaseAdminClient, companyCourseId: string) {
+  const { data: companyCourse, error: courseError } = await admin
+    .from("academia_cursos_empresa")
+    .select("*")
+    .eq("id", companyCourseId)
+    .maybeSingle();
+  if (courseError) throw new Error(`No se pudo consultar el curso empresarial: ${courseError.message}`);
+  if (!companyCourse) throw new Error("El curso empresarial no existe.");
+
+  const { data: contract, error: contractError } = await admin
+    .from("academia_contratos")
+    .select("*")
+    .eq("id", companyCourse.contrato_id)
+    .maybeSingle();
+  if (contractError) throw new Error(`No se pudo consultar el contrato: ${contractError.message}`);
+  if (!contract) throw new Error("El contrato empresarial no existe.");
+
+  const { data: company, error: companyError } = await admin
+    .from("academia_empresas")
+    .select("*")
+    .eq("id", contract.empresa_id)
+    .maybeSingle();
+  if (companyError) throw new Error(`No se pudo consultar la empresa: ${companyError.message}`);
+  if (!company) throw new Error("La empresa no existe.");
+
+  return { companyCourse, contract, company };
+}
+
+async function getCompanyParticipants(admin: SupabaseAdminClient, companyCourseId: string): Promise<JsonObject[]> {
+  const { data, error } = await admin
+    .from("academia_participantes_empresa")
+    .select("*")
+    .eq("curso_empresa_id", companyCourseId)
+    .order("apellidos", { ascending: true })
+    .order("nombres", { ascending: true });
+  if (error) throw new Error(`No se pudieron consultar los participantes: ${error.message}`);
+  return data || [];
+}
+
+async function getOrCreateCompanyGroup(
+  admin: SupabaseAdminClient,
+  context: Awaited<ReturnType<typeof getCompanyCourseContext>>,
+): Promise<JsonObject> {
+  const courseId = Number(context.companyCourse.moodle_course_id || 0);
+  const currentGroupId = Number(context.companyCourse.moodle_group_id || 0);
+  const groupName = cleanText(
+    context.companyCourse.moodle_group_name || `${context.company.nombre} · ${context.contract.codigo}`,
+    254,
+  );
+  const groupIdNumber = cleanText(
+    context.companyCourse.moodle_group_idnumber ||
+      `EMP-${slug(context.company.nombre, 20)}-C${courseId}-${slug(context.contract.codigo, 16)}`,
+    100,
+  );
+
+  const existing = asObjects(await callMoodle("core_group_get_course_groups", { courseid: courseId }))
+    .find((group) =>
+      Number(group.id || 0) === currentGroupId ||
+      (groupIdNumber && String(group.idnumber || "").trim() === groupIdNumber) ||
+      String(group.name || "").trim().toLocaleLowerCase("es") === groupName.toLocaleLowerCase("es")
+    );
+  let group = existing;
+  if (!group) {
+    const parameters: Record<string, MoodleParameter> = {
+      "groups[0][courseid]": courseId,
+      "groups[0][name]": groupName,
+      "groups[0][description]": `Empresa: ${cleanText(context.company.nombre, 180)} · Contrato: ${cleanText(context.contract.codigo, 40)}`,
+      "groups[0][descriptionformat]": 1,
+      "groups[0][idnumber]": groupIdNumber,
+      "groups[0][visibility]": 1,
+      "groups[0][participation]": 1,
+    };
+    group = asObjects(await callMoodle("core_group_create_groups", parameters))[0];
+  }
+  const groupId = positiveInteger(group?.id, "El grupo Moodle");
+  const { error } = await admin
+    .from("academia_cursos_empresa")
+    .update({
+      moodle_group_id: groupId,
+      moodle_group_name: String(group?.name || groupName),
+      moodle_group_idnumber: String(group?.idnumber || groupIdNumber),
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", context.companyCourse.id);
+  if (error) throw new Error(`No se pudo guardar el grupo empresarial: ${error.message}`);
+  return { ...group, id: groupId, name: String(group?.name || groupName), idnumber: String(group?.idnumber || groupIdNumber) };
+}
+
+async function createMoodleCompanyUser(participant: JsonObject, companyName: string): Promise<number> {
+  const participantId = cleanText(participant.id, 36).replace(/-/g, "");
+  const document = normalizeDocument(participant.documento);
+  const email = normalizeEmail(participant.correo);
+  const base = (document || email.split("@")[0] || "participante")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "")
+    .slice(0, 55) || "participante";
+  const username = `emp.${base}.${participantId.slice(0, 8)}`.slice(0, 100);
+  const parameters: Record<string, MoodleParameter> = {
+    "users[0][createpassword]": 1,
+    "users[0][username]": username,
+    "users[0][auth]": "manual",
+    "users[0][firstname]": cleanText(participant.nombres, 100),
+    "users[0][lastname]": cleanText(participant.apellidos, 100),
+    "users[0][email]": email,
+    "users[0][idnumber]": document,
+    "users[0][institution]": cleanText(companyName, 255),
+    "users[0][lang]": "es",
+  };
+  const country = cleanText(participant.pais_iso2, 2).toUpperCase();
+  if (/^[A-Z]{2}$/.test(country)) parameters["users[0][country]"] = country;
+  const created = asObjects(await callMoodle("core_user_create_users", parameters))[0];
+  return positiveInteger(created?.id, "El usuario Moodle creado");
+}
+
+async function ensureCompanyParticipantMoodleUsers(
+  admin: SupabaseAdminClient,
+  supabaseUrl: string,
+  participants: JsonObject[],
+  companyName: string,
+): Promise<{ resolved: Array<{ participant: JsonObject; userId: number; created: boolean }>; failed: JsonObject[] }> {
+  const unresolved = participants.filter((participant) => Number(participant.moodle_user_id || 0) <= 0);
+  const documents = unresolved.map((participant) => normalizeDocument(participant.documento)).filter(Boolean);
+  const emails = unresolved.map((participant) => normalizeEmail(participant.correo)).filter(Boolean);
+  const [documentUsers, emailUsers] = await Promise.all([
+    getMoodleUsersByField("idnumber", documents),
+    getMoodleUsersByField("email", emails),
+  ]);
+  const documentMap = new Map(documentUsers.map((user) => [normalizeDocument(user.idnumber), user]));
+  const emailMap = new Map(emailUsers.map((user) => [normalizeEmail(user.email), user]));
+  const resolved: Array<{ participant: JsonObject; userId: number; created: boolean }> = [];
+  const failed: JsonObject[] = [];
+
+  for (const participant of participants) {
+    try {
+      let userId = Number(participant.moodle_user_id || 0);
+      let created = false;
+      if (!userId && Number(participant.integrante_id || 0) > 0) {
+        const response = await fetch(`${supabaseUrl}/functions/v1/smooth-endpoint`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-webhook-secret": requiredSecret("MOODLE_WEBHOOK_SECRET"),
+          },
+          body: JSON.stringify({ integrante_id: Number(participant.integrante_id), action: "company-admin" }),
+          signal: AbortSignal.timeout(45000),
+        });
+        const result = await response.json().catch(() => ({})) as JsonObject;
+        if (response.ok && result.ok !== false) userId = Number(result.moodle_user_id || 0);
+      }
+      if (!userId) {
+        const byDocument = documentMap.get(normalizeDocument(participant.documento));
+        const byEmail = emailMap.get(normalizeEmail(participant.correo));
+        const documentId = Number(byDocument?.id || 0);
+        const emailId = Number(byEmail?.id || 0);
+        if (documentId && emailId && documentId !== emailId) {
+          throw new Error("El documento y el correo pertenecen a cuentas Moodle diferentes.");
+        }
+        userId = documentId || emailId;
+      }
+      if (!userId) {
+        userId = await createMoodleCompanyUser(participant, companyName);
+        created = true;
+      }
+      const { error } = await admin
+        .from("academia_participantes_empresa")
+        .update({ moodle_user_id: userId, estado: "validado", error_validacion: null, updated_at: new Date().toISOString() })
+        .eq("id", participant.id);
+      if (error) throw new Error(error.message);
+      resolved.push({ participant: { ...participant, moodle_user_id: userId }, userId, created });
+    } catch (error) {
+      const message = cleanError(error);
+      await admin
+        .from("academia_participantes_empresa")
+        .update({ estado: "error", error_validacion: message, updated_at: new Date().toISOString() })
+        .eq("id", participant.id);
+      failed.push({ ...participant, error: message });
+    }
+  }
+  return { resolved, failed };
+}
+
+async function enrolCompanyCourse(
+  admin: SupabaseAdminClient,
+  adminUserId: string,
+  supabaseUrl: string,
+  context: Awaited<ReturnType<typeof getCompanyCourseContext>>,
+  participants: JsonObject[],
+): Promise<JsonObject> {
+  const availableFunctions = await getAvailableMoodleFunctions();
+  const missing = COMPANY_ENROL_FUNCTIONS.filter((name) => !availableFunctions.has(name));
+  if (missing.length) {
+    throw new Error(`Faltan funciones en el servicio externo de Moodle: ${missing.join(", ")}.`);
+  }
+
+  const group = await getOrCreateCompanyGroup(admin, context);
+  const courseId = Number(context.companyCourse.moodle_course_id || 0);
+  const groupId = Number(group.id || 0);
+  const accountResult = await ensureCompanyParticipantMoodleUsers(
+    admin,
+    supabaseUrl,
+    participants,
+    String(context.company.nombre || "Empresa"),
+  );
+  const requestErrors = new Map<number, string>();
+  const timeStart = dateToTimestamp(context.companyCourse.fecha_inicio || context.contract.fecha_inicio);
+  const timeEnd = dateToTimestamp(context.companyCourse.fecha_fin || context.contract.fecha_fin, true);
+  const groupMembersBefore = asObjects(
+    await callMoodle("core_group_get_group_members", { "groupids[0]": groupId }),
+  );
+  const existingGroupMemberIds = new Set(
+    (Array.isArray(groupMembersBefore[0]?.userids) ? groupMembersBefore[0].userids : []).map(Number),
+  );
+
+  for (const batch of chunks(accountResult.resolved, 100)) {
+    const enrolParameters: Record<string, MoodleParameter> = {};
+    batch.forEach((entry, index) => {
+      enrolParameters[`enrolments[${index}][roleid]`] = STUDENT_ROLE_ID;
+      enrolParameters[`enrolments[${index}][userid]`] = entry.userId;
+      enrolParameters[`enrolments[${index}][courseid]`] = courseId;
+      enrolParameters[`enrolments[${index}][timestart]`] = timeStart;
+      enrolParameters[`enrolments[${index}][timeend]`] = timeEnd;
+      enrolParameters[`enrolments[${index}][suspend]`] = 0;
+    });
+    try {
+      await callMoodle("enrol_manual_enrol_users", enrolParameters);
+      const groupParameters: Record<string, MoodleParameter> = {};
+      const groupAdditions = batch.filter((entry) => !existingGroupMemberIds.has(entry.userId));
+      groupAdditions.forEach((entry, index) => {
+        groupParameters[`members[${index}][groupid]`] = groupId;
+        groupParameters[`members[${index}][userid]`] = entry.userId;
+      });
+      if (groupAdditions.length) await callMoodle("core_group_add_group_members", groupParameters);
+    } catch (error) {
+      const message = cleanError(error);
+      for (const entry of batch) requestErrors.set(entry.userId, message);
+    }
+  }
+
+  const courseMemberIds = new Set((await getCourseStudents(courseId)).map((student) => Number(student.id || 0)));
+  const groupResponse = asObjects(await callMoodle("core_group_get_group_members", { "groupids[0]": groupId }));
+  const groupMemberIds = new Set(
+    (Array.isArray(groupResponse[0]?.userids) ? groupResponse[0].userids : []).map(Number),
+  );
+  const succeeded: JsonObject[] = [];
+  const failed = [...accountResult.failed];
+
+  for (const entry of accountResult.resolved) {
+    const verified = courseMemberIds.has(entry.userId) && groupMemberIds.has(entry.userId);
+    const requestError = requestErrors.get(entry.userId);
+    if (verified && !requestError) {
+      const now = new Date().toISOString();
+      const { error } = await admin
+        .from("academia_participantes_empresa")
+        .update({ estado: "matriculado", matriculado_at: now, error_validacion: null, updated_at: now })
+        .eq("id", entry.participant.id);
+      if (error) throw new Error(error.message);
+      succeeded.push({ ...entry.participant, moodle_user_id: entry.userId, account_created: entry.created });
+    } else {
+      const message = requestError || "Moodle no confirmó simultáneamente la matrícula y la pertenencia al grupo.";
+      await admin
+        .from("academia_participantes_empresa")
+        .update({ estado: "error", error_validacion: message, updated_at: new Date().toISOString() })
+        .eq("id", entry.participant.id);
+      failed.push({ ...entry.participant, moodle_user_id: entry.userId, error: message });
+    }
+  }
+
+  const auditRows = [...succeeded, ...failed].map((participant) => {
+    const participantId = String(participant.id || "");
+    const failure = failed.find((item) => String(item.id || "") === participantId);
+    return {
+      admin_user_id: adminUserId,
+      accion: "MATRICULAR_EMPRESA",
+      integrante_id: Number(participant.integrante_id || 0) || null,
+      moodle_user_id: Number(participant.moodle_user_id || 0) || null,
+      moodle_course_id: courseId,
+      detalle: {
+        empresa_id: context.company.id,
+        empresa: context.company.nombre,
+        contrato_id: context.contract.id,
+        curso_empresa_id: context.companyCourse.id,
+        grupo_id: groupId,
+        participante_id: participantId,
+      },
+      resultado: failure ? "ERROR" : "OK",
+      error: failure ? String(failure.error || "No fue posible matricular.") : null,
+    };
+  });
+  if (auditRows.length) {
+    const { error } = await admin.from("moodle_admin_auditoria").insert(auditRows);
+    if (error) console.error("No se pudo registrar la matrícula empresarial:", error.message);
+  }
+
+  const state = succeeded.length ? "activo" : "listo";
+  await admin
+    .from("academia_cursos_empresa")
+    .update({ estado: state, updated_at: new Date().toISOString() })
+    .eq("id", context.companyCourse.id);
+
+  return {
+    company: context.company,
+    contract: context.contract,
+    company_course: { ...context.companyCourse, moodle_group_id: groupId, moodle_group_name: group.name, estado: state },
+    group,
+    requested: participants.length,
+    enrolled: succeeded.length,
+    accounts_created: succeeded.filter((participant) => participant.account_created === true).length,
+    failed: failed.length,
+    failed_participants: failed.slice(0, 30).map((participant) => ({
+      id: participant.id,
+      fullname: `${String(participant.nombres || "")} ${String(participant.apellidos || "")}`.trim(),
+      email: participant.correo,
+      error: participant.error,
+    })),
+  };
+}
+
+async function getCompanyDashboard(admin: SupabaseAdminClient): Promise<JsonObject> {
+  const [companiesResult, contractsResult, coursesResult, participantsResult] = await Promise.all([
+    admin.from("academia_empresas").select("*").order("nombre", { ascending: true }),
+    admin.from("academia_contratos").select("*").order("created_at", { ascending: false }),
+    admin.from("academia_cursos_empresa").select("*").order("created_at", { ascending: false }),
+    admin.from("academia_participantes_empresa").select("id,curso_empresa_id,estado,moodle_user_id,matriculado_at"),
+  ]);
+  for (const result of [companiesResult, contractsResult, coursesResult, participantsResult]) {
+    if (result.error) throw new Error(result.error.message);
+  }
+  const companies = companiesResult.data || [];
+  const contracts = contractsResult.data || [];
+  const companyCourses = coursesResult.data || [];
+  const participants = participantsResult.data || [];
+  const activeParticipants = participants.filter((participant) => !["retirado", "reemplazado"].includes(participant.estado));
+
+  const rows = companies.map((company) => {
+    const companyContracts = contracts.filter((contract) => contract.empresa_id === company.id);
+    const contractIds = new Set(companyContracts.map((contract) => contract.id));
+    const courses = companyCourses.filter((course) => contractIds.has(course.contrato_id));
+    const courseIds = new Set(courses.map((course) => course.id));
+    const companyParticipants = activeParticipants.filter((participant) => courseIds.has(participant.curso_empresa_id));
+    const seats = courses.reduce((sum, course) => sum + Number(course.cupos_contratados || 0), 0);
+    return {
+      ...company,
+      contracts: companyContracts,
+      courses,
+      metrics: {
+        contracts: companyContracts.length,
+        courses: courses.length,
+        seats,
+        occupied: companyParticipants.length,
+        available: Math.max(0, seats - companyParticipants.length),
+        enrolled: companyParticipants.filter((participant) => participant.estado === "matriculado").length,
+        pending: companyParticipants.filter((participant) => participant.estado !== "matriculado").length,
+      },
+    };
+  });
+
+  const totalSeats = companyCourses.reduce((sum, course) => sum + Number(course.cupos_contratados || 0), 0);
+  return {
+    companies: rows,
+    summary: {
+      companies: companies.length,
+      active_companies: companies.filter((company) => company.estado === "activo").length,
+      contracts: contracts.length,
+      courses: companyCourses.length,
+      seats: totalSeats,
+      occupied: activeParticipants.length,
+      available: Math.max(0, totalSeats - activeParticipants.length),
+      enrolled: activeParticipants.filter((participant) => participant.estado === "matriculado").length,
+    },
+  };
+}
+
+async function importCompanyParticipants(
+  admin: SupabaseAdminClient,
+  adminUserId: string,
+  companyCourseId: string,
+  rawRows: unknown[],
+  origin: string,
+): Promise<JsonObject> {
+  if (!rawRows.length) throw new Error("Agrega al menos un participante.");
+  if (rawRows.length > MAX_COMPANY_IMPORT) {
+    throw new Error(`Solo se permiten ${MAX_COMPANY_IMPORT} participantes por importación.`);
+  }
+  const context = await getCompanyCourseContext(admin, companyCourseId);
+  const existing = await getCompanyParticipants(admin, companyCourseId);
+  const activeExisting = existing.filter((participant) => !["retirado", "reemplazado"].includes(String(participant.estado || "")));
+  const existingEmails = new Set(activeExisting.map((participant) => normalizeEmail(participant.correo)).filter(Boolean));
+  const existingDocuments = new Set(activeExisting.map((participant) => normalizeDocument(participant.documento)).filter(Boolean));
+  const payloadEmails = new Set<string>();
+  const payloadDocuments = new Set<string>();
+  const errors: JsonObject[] = [];
+  const candidates: JsonObject[] = [];
+
+  rawRows.forEach((raw, index) => {
+    const row = asObject(raw);
+    const nombres = cleanText(row.nombres || row.firstname || row.nombre, 120);
+    const apellidos = cleanText(row.apellidos || row.lastname || row.apellido, 120);
+    const correo = normalizeEmail(row.correo || row.email);
+    const documento = normalizeDocument(row.documento || row.cedula || row.idnumber);
+    const rowErrors: string[] = [];
+    if (!nombres) rowErrors.push("Falta el nombre");
+    if (!apellidos) rowErrors.push("Falta el apellido");
+    if (!validEmail(correo)) rowErrors.push("Correo no válido");
+    if (existingEmails.has(correo)) rowErrors.push("El correo ya está incluido en este curso empresarial");
+    if (documento && existingDocuments.has(documento)) rowErrors.push("El documento ya está incluido en este curso empresarial");
+    if (payloadEmails.has(correo)) rowErrors.push("Correo repetido en la lista");
+    if (documento && payloadDocuments.has(documento)) rowErrors.push("Documento repetido en la lista");
+    if (rowErrors.length) {
+      errors.push({ row: index + 2, nombres, apellidos, correo, documento, errors: rowErrors });
+      return;
+    }
+    payloadEmails.add(correo);
+    if (documento) payloadDocuments.add(documento);
+    candidates.push({
+      nombres,
+      apellidos,
+      tipo_documento: cleanText(row.tipo_documento || row.document_type, 40) || null,
+      documento: documento || null,
+      correo,
+      telefono: cleanText(row.telefono || row.whatsapp || row.phone, 40) || null,
+      pais_iso2: cleanText(row.pais_iso2 || row.country, 2).toUpperCase() || null,
+    });
+  });
+
+  const availableSeats = Number(context.companyCourse.cupos_contratados || 0) - activeExisting.length;
+  if (candidates.length > availableSeats) {
+    throw new Error(`La lista válida contiene ${candidates.length} personas y solo quedan ${Math.max(0, availableSeats)} cupos.`);
+  }
+
+  const { data: directoryMembers, error: membersError } = await admin
+    .from("integrantes")
+    .select("id,nombres,apellidos,documento,cedula,correo,pais_iso2,moodle_user_id");
+  if (membersError) throw new Error(`No se pudo cruzar el Directorio: ${membersError.message}`);
+  const membersByDocument = new Map<string, JsonObject[]>();
+  const membersByEmail = new Map<string, JsonObject[]>();
+  for (const member of directoryMembers || []) {
+    const document = normalizeDocument(member.documento || member.cedula);
+    const email = normalizeEmail(member.correo);
+    if (document) membersByDocument.set(document, [...(membersByDocument.get(document) || []), member]);
+    if (email) membersByEmail.set(email, [...(membersByEmail.get(email) || []), member]);
+  }
+
+  const inserts: JsonObject[] = [];
+  candidates.forEach((candidate, index) => {
+    const documentMatches = candidate.documento ? membersByDocument.get(String(candidate.documento)) || [] : [];
+    const emailMatches = membersByEmail.get(String(candidate.correo)) || [];
+    const documentIds = new Set(documentMatches.map((member) => Number(member.id || 0)).filter(Boolean));
+    const emailIds = new Set(emailMatches.map((member) => Number(member.id || 0)).filter(Boolean));
+    let matched: JsonObject | null = null;
+    if (documentIds.size > 1 || emailIds.size > 1) {
+      errors.push({ row: index + 2, ...candidate, errors: ["Hay más de un integrante coincidente en el Directorio"] });
+      return;
+    }
+    if (documentIds.size && emailIds.size && [...documentIds][0] !== [...emailIds][0]) {
+      errors.push({ row: index + 2, ...candidate, errors: ["El documento y el correo corresponden a integrantes diferentes"] });
+      return;
+    }
+    matched = documentMatches[0] || emailMatches[0] || null;
+    inserts.push({
+      curso_empresa_id: companyCourseId,
+      integrante_id: Number(matched?.id || 0) || null,
+      moodle_user_id: Number(matched?.moodle_user_id || 0) || null,
+      ...candidate,
+      origen: ["csv", "excel", "enlace"].includes(origin) ? origin : "admin",
+      estado: Number(matched?.moodle_user_id || 0) > 0 ? "validado" : "pendiente",
+      created_by: adminUserId,
+    });
+  });
+
+  let inserted: JsonObject[] = [];
+  if (inserts.length) {
+    const { data, error } = await admin
+      .from("academia_participantes_empresa")
+      .insert(inserts)
+      .select("*");
+    if (error) throw new Error(`No se pudieron guardar los participantes: ${error.message}`);
+    inserted = data || [];
+  }
+  await audit(admin, {
+    admin_user_id: adminUserId,
+    accion: "IMPORTAR_PARTICIPANTES_EMPRESA",
+    moodle_course_id: Number(context.companyCourse.moodle_course_id || 0),
+    detalle: {
+      empresa_id: context.company.id,
+      contrato_id: context.contract.id,
+      curso_empresa_id: companyCourseId,
+      recibidos: rawRows.length,
+      importados: inserted.length,
+      rechazados: errors.length,
+      origen: origin,
+    },
+    resultado: errors.length && !inserted.length ? "ERROR" : "OK",
+    error: errors.length && !inserted.length ? "Ninguna fila válida." : null,
+  });
+  return {
+    imported: inserted.length,
+    rejected: errors.length,
+    errors: errors.slice(0, 100),
+    participants: await getCompanyParticipants(admin, companyCourseId),
+    seats: Number(context.companyCourse.cupos_contratados || 0),
+  };
+}
+
+async function getCompanyReportData(
+  admin: SupabaseAdminClient,
+  adminUserId: string,
+  companyId: string,
+  companyCourseId: string | null,
+  inactiveDays: number,
+): Promise<JsonObject> {
+  const { data: company, error: companyError } = await admin
+    .from("academia_empresas")
+    .select("*")
+    .eq("id", companyId)
+    .maybeSingle();
+  if (companyError) throw new Error(companyError.message);
+  if (!company) throw new Error("La empresa no existe.");
+  const { data: contracts, error: contractsError } = await admin
+    .from("academia_contratos")
+    .select("*")
+    .eq("empresa_id", companyId)
+    .order("created_at", { ascending: false });
+  if (contractsError) throw new Error(contractsError.message);
+  const contractIds = (contracts || []).map((contract) => contract.id);
+  if (!contractIds.length) {
+    return { company, contracts: [], courses: [], summary: { courses: 0, participants: 0 } };
+  }
+  let companyCoursesQuery = admin
+    .from("academia_cursos_empresa")
+    .select("*")
+    .in("contrato_id", contractIds)
+    .order("created_at", { ascending: false });
+  if (companyCourseId) companyCoursesQuery = companyCoursesQuery.eq("id", companyCourseId);
+  const { data: companyCourses, error: coursesError } = await companyCoursesQuery;
+  if (coursesError) throw new Error(coursesError.message);
+  const courseLineIds = (companyCourses || []).map((course) => course.id);
+  let participants: JsonObject[] = [];
+  if (courseLineIds.length) {
+    const { data, error } = await admin
+      .from("academia_participantes_empresa")
+      .select("*")
+      .in("curso_empresa_id", courseLineIds)
+      .not("estado", "in", "(retirado,reemplazado)");
+    if (error) throw new Error(error.message);
+    participants = data || [];
+  }
+  if (participants.length > MAX_COMPANY_REPORT_PARTICIPANTS) {
+    throw new Error(`El informe supera ${MAX_COMPANY_REPORT_PARTICIPANTS} participantes. Selecciona un curso específico.`);
+  }
+
+  const courseRows: JsonObject[] = [];
+  const moodleCourses = await getCourses();
+  for (const companyCourse of companyCourses || []) {
+    const courseParticipants = participants.filter((participant) => participant.curso_empresa_id === companyCourse.id);
+    try {
+      const moodleCourse = moodleCourses.find((course) => Number(course.id || 0) === Number(companyCourse.moodle_course_id || 0)) || {
+        id: companyCourse.moodle_course_id,
+        fullname: companyCourse.moodle_course_name,
+        shortname: companyCourse.moodle_course_shortname,
+      };
+      const enrolledStudents = await getCourseStudents(Number(companyCourse.moodle_course_id || 0));
+      const studentMap = new Map(enrolledStudents.map((student) => [Number(student.id || 0), student]));
+      const reportStudents: JsonObject[] = [];
+      for (const batch of chunks(courseParticipants, 5)) {
+        const detailed = await Promise.all(batch.map(async (participant) => {
+          const moodleUserId = Number(participant.moodle_user_id || 0);
+          const student = studentMap.get(moodleUserId);
+          if (!moodleUserId || !student) {
+            return {
+              participant_id: participant.id,
+              fullname: `${String(participant.nombres || "")} ${String(participant.apellidos || "")}`.trim(),
+              email: participant.correo,
+              document: participant.documento,
+              moodle_user_id: moodleUserId || null,
+              enrolled: false,
+              access_status: "never",
+              lastcourseaccess: 0,
+              completed: false,
+              progress: null,
+              activities_pending: null,
+              grade: gradeSummary({}),
+              alerts: [{ code: "not_enrolled", severity: "danger", message: "No aparece matriculado en Moodle" }],
+              certificate_status: "pendiente",
+            };
+          }
+          const detail = await getAcademicStudentDetail(moodleCourse, student, inactiveDays);
+          return {
+            ...detail,
+            participant_id: participant.id,
+            fullname: `${String(participant.nombres || "")} ${String(participant.apellidos || "")}`.trim(),
+            email: participant.correo,
+            document: participant.documento,
+            enrolled: true,
+            certificate_status: detail.completed === true ? "elegible" : "pendiente",
+          };
+        }));
+        reportStudents.push(...detailed);
+      }
+      const numericProgress = reportStudents
+        .filter((student) => student.progress != null)
+        .map((student) => Number(student.progress))
+        .filter(Number.isFinite);
+      const numericGrades = reportStudents
+        .filter((student) => asObject(student.grade).percentage != null)
+        .map((student) => Number(asObject(student.grade).percentage))
+        .filter(Number.isFinite);
+      courseRows.push({
+        company_course: companyCourse,
+        moodle_course: moodleCourse,
+        contract: (contracts || []).find((contract) => contract.id === companyCourse.contrato_id) || null,
+        students: reportStudents,
+        summary: {
+          seats: Number(companyCourse.cupos_contratados || 0),
+          participants: reportStudents.length,
+          enrolled: reportStudents.filter((student) => student.enrolled === true).length,
+          active: reportStudents.filter((student) => student.access_status === "active").length,
+          inactive: reportStudents.filter((student) => student.access_status === "inactive").length,
+          never_accessed: reportStudents.filter((student) => student.access_status === "never").length,
+          completed: reportStudents.filter((student) => student.completed === true).length,
+          average_progress: numericProgress.length ? Math.round(numericProgress.reduce((sum, value) => sum + value, 0) * 10 / numericProgress.length) / 10 : null,
+          average_grade: numericGrades.length ? Math.round(numericGrades.reduce((sum, value) => sum + value, 0) * 10 / numericGrades.length) / 10 : null,
+          pending_activities: reportStudents.reduce((sum, student) => sum + Number(student.activities_pending || 0), 0),
+          alerts: reportStudents.reduce((sum, student) => sum + asObjects(student.alerts).length, 0),
+        },
+      });
+    } catch (error) {
+      courseRows.push({ company_course: companyCourse, students: [], error: cleanError(error) });
+    }
+  }
+
+  const successfulCourses = courseRows.filter((course) => !course.error);
+  const allStudents = successfulCourses.flatMap((course) => Array.isArray(course.students) ? course.students : []);
+  const progressValues = allStudents
+    .filter((student) => student.progress != null)
+    .map((student) => Number(student.progress))
+    .filter(Number.isFinite);
+  const gradeValues = allStudents
+    .filter((student) => asObject(student.grade).percentage != null)
+    .map((student) => Number(asObject(student.grade).percentage))
+    .filter(Number.isFinite);
+  const report = {
+    generated_at: new Date().toISOString(),
+    inactive_days: inactiveDays,
+    scope: companyCourseId ? "course" : "company",
+    company,
+    contracts: contracts || [],
+    courses: courseRows,
+    summary: {
+      courses: courseRows.length,
+      readable_courses: successfulCourses.length,
+      seats: successfulCourses.reduce((sum, course) => sum + Number(asObject(course.summary).seats || 0), 0),
+      participants: allStudents.length,
+      enrolled: allStudents.filter((student) => student.enrolled === true).length,
+      active: allStudents.filter((student) => student.access_status === "active").length,
+      inactive: allStudents.filter((student) => student.access_status === "inactive").length,
+      never_accessed: allStudents.filter((student) => student.access_status === "never").length,
+      completed: allStudents.filter((student) => student.completed === true).length,
+      average_progress: progressValues.length ? Math.round(progressValues.reduce((sum, value) => sum + value, 0) * 10 / progressValues.length) / 10 : null,
+      average_grade: gradeValues.length ? Math.round(gradeValues.reduce((sum, value) => sum + value, 0) * 10 / gradeValues.length) / 10 : null,
+      pending_activities: allStudents.reduce((sum, student) => sum + Number(student.activities_pending || 0), 0),
+      alerts: allStudents.reduce((sum, student) => sum + asObjects(student.alerts).length, 0),
+    },
+  };
+  await audit(admin, {
+    admin_user_id: adminUserId,
+    accion: "GENERAR_INFORME_EMPRESA",
+    moodle_course_id: companyCourseId && companyCourses?.length ? Number(companyCourses[0].moodle_course_id || 0) : null,
+    detalle: { empresa_id: companyId, curso_empresa_id: companyCourseId, participantes: allStudents.length },
+    resultado: "OK",
+  });
+  return report;
+}
+
 async function getMoodleUsersByIds(userIds: number[]): Promise<JsonObject[]> {
   if (!userIds.length) return [];
 
@@ -1333,6 +2092,264 @@ Deno.serve(async (req: Request) => {
         },
         courses,
       });
+    }
+
+    if (action === "company_dashboard") {
+      const [dashboard, courses, availableFunctions] = await Promise.all([
+        getCompanyDashboard(admin),
+        getCourses(),
+        getAvailableMoodleFunctions(),
+      ]);
+      const missing = COMPANY_ENROL_FUNCTIONS.filter((name) => !availableFunctions.has(name));
+      return json(req, {
+        ok: true,
+        ...dashboard,
+        moodle_courses: courses,
+        capabilities: {
+          company_enrol: missing.length === 0,
+          missing,
+        },
+      });
+    }
+
+    if (action === "company_save") {
+      const companyId = optionalUuid(body.company_id, "La empresa");
+      const name = cleanText(body.nombre, 180);
+      if (name.length < 2) throw new Error("Escribe el nombre de la empresa.");
+      const country = cleanText(body.pais_iso2, 2).toUpperCase();
+      if (country && !/^[A-Z]{2}$/.test(country)) throw new Error("El país no es válido.");
+      const values = {
+        nombre: name,
+        identificador_fiscal: cleanText(body.identificador_fiscal, 80) || null,
+        pais_iso2: country || null,
+        contacto_nombre: cleanText(body.contacto_nombre, 160) || null,
+        contacto_cargo: cleanText(body.contacto_cargo, 120) || null,
+        contacto_email: normalizeEmail(body.contacto_email) || null,
+        contacto_telefono: cleanText(body.contacto_telefono, 50) || null,
+        estado: ["activo", "inactivo"].includes(String(body.estado)) ? String(body.estado) : "activo",
+        notas: cleanText(body.notas, 2000) || null,
+        updated_at: new Date().toISOString(),
+      };
+      if (values.contacto_email && !validEmail(values.contacto_email)) throw new Error("El correo de contacto no es válido.");
+      const query = companyId
+        ? admin.from("academia_empresas").update(values).eq("id", companyId).select("*").single()
+        : admin.from("academia_empresas").insert({ ...values, created_by: adminUserId }).select("*").single();
+      const { data: company, error } = await query;
+      if (error) throw new Error(error.code === "23505" ? "Ya existe una empresa con ese nombre o identificación fiscal." : error.message);
+      await audit(admin, {
+        admin_user_id: adminUserId,
+        accion: companyId ? "ACTUALIZAR_EMPRESA" : "CREAR_EMPRESA",
+        detalle: { empresa_id: company.id, empresa: company.nombre },
+        resultado: "OK",
+      });
+      return json(req, { ok: true, company });
+    }
+
+    if (action === "company_contract_save") {
+      const contractId = optionalUuid(body.contract_id, "El contrato");
+      const companyId = optionalUuid(body.company_id, "La empresa");
+      if (!companyId) throw new Error("Selecciona la empresa.");
+      const { data: company, error: companyError } = await admin
+        .from("academia_empresas")
+        .select("id,nombre")
+        .eq("id", companyId)
+        .maybeSingle();
+      if (companyError) throw new Error(companyError.message);
+      if (!company) throw new Error("La empresa no existe.");
+      const code = cleanText(body.codigo, 40).toUpperCase() ||
+        `EMP-${new Date().getUTCFullYear()}-${crypto.randomUUID().slice(0, 8).toUpperCase()}`;
+      const name = cleanText(body.nombre, 180) || `${company.nombre} · ${code}`;
+      const startDate = optionalIsoDate(body.fecha_inicio, "La fecha de inicio");
+      const endDate = optionalIsoDate(body.fecha_fin, "La fecha de finalización");
+      if (startDate && endDate && endDate < startDate) throw new Error("La fecha final no puede ser anterior a la inicial.");
+      const currency = cleanText(body.moneda || "USD", 3).toUpperCase();
+      if (!/^[A-Z]{3}$/.test(currency)) throw new Error("La moneda debe tener tres letras.");
+      const amount = body.monto_total === "" || body.monto_total == null ? null : Number(body.monto_total);
+      if (amount != null && (!Number.isFinite(amount) || amount < 0)) throw new Error("El monto no es válido.");
+      const values = {
+        empresa_id: companyId,
+        codigo: code,
+        nombre: name,
+        estado: ["borrador", "activo", "completado", "cancelado"].includes(String(body.estado)) ? String(body.estado) : "borrador",
+        fecha_inicio: startDate,
+        fecha_fin: endDate,
+        moneda: currency,
+        monto_total: amount,
+        estado_pago: ["pendiente", "parcial", "pagado", "no_aplica"].includes(String(body.estado_pago)) ? String(body.estado_pago) : "pendiente",
+        contacto_nombre: cleanText(body.contacto_nombre, 160) || null,
+        contacto_email: normalizeEmail(body.contacto_email) || null,
+        contacto_telefono: cleanText(body.contacto_telefono, 50) || null,
+        notas: cleanText(body.notas, 2000) || null,
+        updated_at: new Date().toISOString(),
+      };
+      if (values.contacto_email && !validEmail(values.contacto_email)) throw new Error("El correo del contrato no es válido.");
+      const query = contractId
+        ? admin.from("academia_contratos").update(values).eq("id", contractId).select("*").single()
+        : admin.from("academia_contratos").insert({ ...values, created_by: adminUserId }).select("*").single();
+      const { data: contract, error } = await query;
+      if (error) throw new Error(error.code === "23505" ? "Ya existe un contrato con ese código." : error.message);
+      await audit(admin, {
+        admin_user_id: adminUserId,
+        accion: contractId ? "ACTUALIZAR_CONTRATO_EMPRESA" : "CREAR_CONTRATO_EMPRESA",
+        detalle: { empresa_id: companyId, contrato_id: contract.id, codigo: contract.codigo },
+        resultado: "OK",
+      });
+      return json(req, { ok: true, contract });
+    }
+
+    if (action === "company_course_save") {
+      const companyCourseId = optionalUuid(body.company_course_id, "El curso empresarial");
+      const contractId = optionalUuid(body.contract_id, "El contrato");
+      if (!contractId) throw new Error("Selecciona el contrato.");
+      const courseId = positiveInteger(body.moodle_course_id, "El curso Moodle");
+      const seats = positiveInteger(body.cupos_contratados, "Los cupos");
+      if (seats > 5000) throw new Error("Los cupos no pueden superar 5.000.");
+      const modality = ["compartido", "exclusivo"].includes(String(body.modalidad)) ? String(body.modalidad) : "compartido";
+      const startDate = optionalIsoDate(body.fecha_inicio, "La fecha de inicio");
+      const endDate = optionalIsoDate(body.fecha_fin, "La fecha de finalización");
+      if (startDate && endDate && endDate < startDate) throw new Error("La fecha final no puede ser anterior a la inicial.");
+      const price = body.precio === "" || body.precio == null ? null : Number(body.precio);
+      if (price != null && (!Number.isFinite(price) || price < 0)) throw new Error("El precio no es válido.");
+      const [{ data: contract, error: contractError }, courses] = await Promise.all([
+        admin.from("academia_contratos").select("*, academia_empresas(id,nombre)").eq("id", contractId).maybeSingle(),
+        getCourses(),
+      ]);
+      if (contractError) throw new Error(contractError.message);
+      if (!contract) throw new Error("El contrato no existe.");
+      const course = courses.find((item) => Number(item.id || 0) === courseId);
+      if (!course) throw new Error("El curso Moodle seleccionado no existe.");
+      if (companyCourseId) {
+        const { count, error: countError } = await admin
+          .from("academia_participantes_empresa")
+          .select("id", { count: "exact", head: true })
+          .eq("curso_empresa_id", companyCourseId)
+          .not("estado", "in", "(retirado,reemplazado)");
+        if (countError) throw new Error(countError.message);
+        if (seats < Number(count || 0)) throw new Error(`No puedes reducir los cupos por debajo de los ${count || 0} participantes actuales.`);
+      }
+      const companyName = cleanText(asObject(contract.academia_empresas).nombre, 180) || "Empresa";
+      const values: JsonObject = {
+        contrato_id: contractId,
+        moodle_course_id: courseId,
+        moodle_course_name: course.fullname,
+        moodle_course_shortname: course.shortname,
+        modalidad: modality,
+        cupos_contratados: seats,
+        fecha_inicio: startDate,
+        fecha_fin: endDate,
+        precio: price,
+        updated_at: new Date().toISOString(),
+      };
+      if (!companyCourseId) {
+        const identifier = `EMP-${slug(companyName, 20)}-C${courseId}-${crypto.randomUUID().slice(0, 6).toUpperCase()}`;
+        values.moodle_group_name = cleanText(`${companyName} · ${contract.codigo}`, 254);
+        values.moodle_group_idnumber = identifier;
+        values.created_by = adminUserId;
+      }
+      const query = companyCourseId
+        ? admin.from("academia_cursos_empresa").update(values).eq("id", companyCourseId).select("*").single()
+        : admin.from("academia_cursos_empresa").insert(values).select("*").single();
+      const { data: companyCourse, error } = await query;
+      if (error) throw new Error(error.message);
+      await audit(admin, {
+        admin_user_id: adminUserId,
+        accion: companyCourseId ? "ACTUALIZAR_CURSO_EMPRESA" : "CREAR_CURSO_EMPRESA",
+        moodle_course_id: courseId,
+        detalle: { empresa_id: asObject(contract.academia_empresas).id, contrato_id: contractId, curso_empresa_id: companyCourse.id, cupos: seats },
+        resultado: "OK",
+      });
+      return json(req, { ok: true, company_course: companyCourse });
+    }
+
+    if (action === "company_course_detail") {
+      const companyCourseId = optionalUuid(body.company_course_id, "El curso empresarial");
+      if (!companyCourseId) throw new Error("Selecciona el curso empresarial.");
+      const [context, participants] = await Promise.all([
+        getCompanyCourseContext(admin, companyCourseId),
+        getCompanyParticipants(admin, companyCourseId),
+      ]);
+      const active = participants.filter((participant) => !["retirado", "reemplazado"].includes(String(participant.estado || "")));
+      return json(req, {
+        ok: true,
+        ...context,
+        participants,
+        summary: {
+          seats: Number(context.companyCourse.cupos_contratados || 0),
+          occupied: active.length,
+          available: Math.max(0, Number(context.companyCourse.cupos_contratados || 0) - active.length),
+          enrolled: active.filter((participant) => participant.estado === "matriculado").length,
+          pending: active.filter((participant) => participant.estado !== "matriculado").length,
+          errors: active.filter((participant) => participant.estado === "error").length,
+        },
+      });
+    }
+
+    if (action === "company_participants_import") {
+      const companyCourseId = optionalUuid(body.company_course_id, "El curso empresarial");
+      if (!companyCourseId) throw new Error("Selecciona el curso empresarial.");
+      const rows = Array.isArray(body.participants) ? body.participants : [];
+      const result = await importCompanyParticipants(
+        admin,
+        adminUserId,
+        companyCourseId,
+        rows,
+        cleanText(body.origin, 20).toLowerCase(),
+      );
+      return json(req, { ok: true, result });
+    }
+
+    if (action === "company_enrol_preview" || action === "company_enrol") {
+      const companyCourseId = optionalUuid(body.company_course_id, "El curso empresarial");
+      if (!companyCourseId) throw new Error("Selecciona el curso empresarial.");
+      const [context, allParticipants, availableFunctions] = await Promise.all([
+        getCompanyCourseContext(admin, companyCourseId),
+        getCompanyParticipants(admin, companyCourseId),
+        getAvailableMoodleFunctions(),
+      ]);
+      const participants = allParticipants.filter((participant) =>
+        !["matriculado", "retirado", "reemplazado"].includes(String(participant.estado || ""))
+      );
+      const missing = COMPANY_ENROL_FUNCTIONS.filter((name) => !availableFunctions.has(name));
+      if (action === "company_enrol_preview") {
+        return json(req, {
+          ok: true,
+          company: context.company,
+          contract: context.contract,
+          company_course: context.companyCourse,
+          count: participants.length,
+          accounts_to_resolve: participants.filter((participant) => !Number(participant.moodle_user_id || 0)).length,
+          existing_accounts: participants.filter((participant) => Number(participant.moodle_user_id || 0) > 0).length,
+          group_exists: Number(context.companyCourse.moodle_group_id || 0) > 0,
+          capabilities: { ready: missing.length === 0, missing },
+          sample: participants.slice(0, 20).map((participant) => ({
+            fullname: `${String(participant.nombres || "")} ${String(participant.apellidos || "")}`.trim(),
+            email: participant.correo,
+            document: participant.documento,
+          })),
+        });
+      }
+      if (body.confirmed !== true) throw new Error("La matrícula empresarial requiere confirmación explícita.");
+      const expectedCount = nonNegativeInteger(body.expected_count, "La cantidad confirmada");
+      if (expectedCount !== participants.length) {
+        throw new Error("La lista cambió después de la confirmación. Actualiza y vuelve a intentarlo.");
+      }
+      if (!participants.length) throw new Error("No hay participantes pendientes de matricular.");
+      if (missing.length) throw new Error(`Faltan funciones en Moodle: ${missing.join(", ")}.`);
+      await admin
+        .from("academia_cursos_empresa")
+        .update({ estado: "matriculando", updated_at: new Date().toISOString() })
+        .eq("id", companyCourseId);
+      const result = await enrolCompanyCourse(admin, adminUserId, supabaseUrl, context, participants);
+      return json(req, { ok: true, result });
+    }
+
+    if (action === "company_report_data") {
+      const companyId = optionalUuid(body.company_id, "La empresa");
+      if (!companyId) throw new Error("Selecciona la empresa.");
+      const companyCourseId = optionalUuid(body.company_course_id, "El curso empresarial");
+      const inactiveDays = Math.min(180, Math.max(1, Number(body.inactive_days || 15)));
+      const report = await getCompanyReportData(admin, adminUserId, companyId, companyCourseId, inactiveDays);
+      return json(req, { ok: true, report });
     }
 
     if (action === "academic_overview") {
