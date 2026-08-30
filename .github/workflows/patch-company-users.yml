@@ -16,55 +16,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Add manual participant and Moodle lookup UI
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          p=Path('index.html')
-          text=p.read_text(encoding='utf-8')
-          if 'companyMoodleLookup' in text:
-              print('UI already patched')
-              raise SystemExit(0)
-
-          html_anchor='''            <div class="company-import-grid">\n              <div class="company-import-box">\n                <h4>Cargar participantes</h4>'''
-          html_new='''            <div class="company-import-grid">\n              <div class="company-import-box" style="grid-column:1/-1">\n                <h4>Agregar una persona o reutilizar una cuenta Moodle</h4>\n                <p>Busca primero por correo, documento o ID Moodle. Si la cuenta existe se reutiliza; si no existe, Gestión la creará al matricular. Nunca se crea una segunda cuenta si Moodle ya tiene una coincidencia válida.</p>\n                <div class="form-grid">\n                  <div class="field span-2"><label>Buscar en Moodle</label><div style="display:flex;gap:8px;flex-wrap:wrap"><input id="companyMoodleLookup" class="control" style="flex:1 1 280px" placeholder="Correo, documento o ID Moodle"><button id="companyMoodleSearchBtn" class="btn btn-secondary" type="button"><i class="fa-solid fa-magnifying-glass"></i> Buscar usuario</button></div><div id="companyMoodleSearchResults" style="margin-top:8px"></div></div>\n                  <div class="field"><label>Nombres</label><input id="companyManualFirst" class="control" autocomplete="off"></div>\n                  <div class="field"><label>Apellidos</label><input id="companyManualLast" class="control" autocomplete="off"></div>\n                  <div class="field"><label>Documento / ID</label><input id="companyManualDocument" class="control" autocomplete="off"></div>\n                  <div class="field"><label>Correo</label><input id="companyManualEmail" class="control" type="email" autocomplete="off"></div>\n                  <div class="field"><label>Teléfono</label><input id="companyManualPhone" class="control" autocomplete="off"></div>\n                  <div class="field"><label>País ISO</label><input id="companyManualCountry" class="control" maxlength="2" placeholder="VE, CL, CO..."></div>\n                </div>\n                <div class="company-file-row"><button id="companyManualAddBtn" class="btn btn-primary" type="button"><i class="fa-solid fa-user-plus"></i> Agregar participante</button><button id="companyManualClearBtn" class="btn btn-secondary" type="button"><i class="fa-solid fa-eraser"></i> Limpiar</button></div>\n                <div class="person-sub" style="margin-top:8px">Si es el único participante pendiente, Gestión lo matriculará de inmediato. Si ya existen otros pendientes, quedará en la lista para “Matricular pendientes”.</div>\n              </div>\n              <div class="company-import-box">\n                <h4>Cargar participantes</h4>'''
-          if html_anchor not in text:
-              raise SystemExit('HTML anchor not found')
-          text=text.replace(html_anchor,html_new,1)
-
-          js_anchor='''    function normalizeCompanyHeader(value){return String(value||'').normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,'')}'''
-          js_new=r'''    async function companyMoodleLookupApi(payload={}){const {data,error}=await sb.functions.invoke('moodle-company-user-search',{body:payload});if(error){let message=error.message||'No se pudo buscar en Moodle.';try{const detail=await error.context?.json();if(detail?.error)message=detail.error}catch{}throw new Error(message)}if(!data?.ok)throw new Error(data?.error||'Moodle rechazó la búsqueda.');return data}
-    function clearCompanyManualParticipant(clearSearch=true){['companyManualFirst','companyManualLast','companyManualDocument','companyManualEmail','companyManualPhone','companyManualCountry'].forEach(id=>{if($(id))$(id).value=''});if(clearSearch&&$('companyMoodleLookup'))$('companyMoodleLookup').value='';if($('companyMoodleSearchResults'))$('companyMoodleSearchResults').innerHTML='';companyState().moodleSearchResults=[]}
-    function useCompanyMoodleUser(userId){const user=(companyState().moodleSearchResults||[]).find(item=>Number(item.id)===Number(userId));if(!user)return;$('companyManualFirst').value=user.firstname||'';$('companyManualLast').value=user.lastname||'';$('companyManualDocument').value=user.idnumber||'';$('companyManualEmail').value=user.email||'';$('companyMoodleLookup').value=user.email||user.idnumber||String(user.id);toast(`Cuenta Moodle #${user.id} seleccionada. Se reutilizará al matricular.`)}
-    function renderCompanyMoodleSearchResults(users=[]){companyState().moodleSearchResults=users;const box=$('companyMoodleSearchResults');if(!users.length){box.innerHTML='<div class="academic-notice warn" style="border-radius:12px;border:1px solid #ffe2a2">No se encontró una cuenta Moodle con ese dato. Completa los datos de la persona; si sigue sin existir al matricular, Gestión creará una cuenta nueva.</div>';return}box.innerHTML=users.map(user=>{const cohort=user.company_participant?`<span class="badge warn">Ya está en esta cohorte · ${safe(user.company_participant.estado||'registrado')}</span>`:'';const course=user.enrolled_in_course?'<span class="badge ok">Ya matriculado en el curso</span>':'<span class="badge teal">No matriculado en este curso</span>';const group=user.in_company_group?'<span class="badge ok">Ya está en el grupo empresa</span>':'<span class="badge warn">Aún no está en el grupo empresa</span>';const suspended=user.suspended?'<span class="badge danger">Cuenta suspendida</span>':'';return `<div style="border:1px solid var(--line);border-radius:14px;background:#fff;padding:11px;margin-top:7px;display:flex;gap:10px;align-items:center;flex-wrap:wrap"><div style="flex:1 1 260px"><b style="color:var(--navy)">${safe(user.fullname||`Usuario Moodle #${user.id}`)}</b><div class="person-sub">Moodle #${safe(user.id)} · ${safe(user.email||'Sin correo')} · ${safe(user.idnumber||'Sin documento')}</div><div style="display:flex;gap:5px;flex-wrap:wrap;margin-top:7px">${course}${group}${cohort}${suspended}</div></div><button class="btn btn-secondary" type="button" data-company-use-moodle="${safe(user.id)}" ${user.suspended||user.company_participant?'disabled':''}><i class="fa-solid fa-link"></i> Usar esta cuenta</button></div>`}).join('');box.querySelectorAll('[data-company-use-moodle]').forEach(button=>button.addEventListener('click',()=>useCompanyMoodleUser(Number(button.dataset.companyUseMoodle))))}
-    async function searchCompanyMoodleUser(){const detail=companyState().courseDetail,query=$('companyMoodleLookup').value.trim();if(!detail)return toast('Abre un curso empresarial.',true);if(!query)return toast('Escribe correo, documento o ID Moodle.',true);showLoading(true);try{const result=await companyMoodleLookupApi({query,company_course_id:detail.companyCourse.id});renderCompanyMoodleSearchResults(result.users||[]);if(result.users?.length)toast(`${result.users.length} cuenta${result.users.length===1?'':'s'} encontrada${result.users.length===1?'':'s'} en Moodle.`)}catch(error){toast(error.message,true)}finally{showLoading(false)}}
-    async function addManualCompanyParticipant(){const detail=companyState().courseDetail;if(!detail)return toast('Abre un curso empresarial.',true);const row={nombres:$('companyManualFirst').value.trim(),apellidos:$('companyManualLast').value.trim(),documento:$('companyManualDocument').value.trim(),correo:$('companyManualEmail').value.trim(),telefono:$('companyManualPhone').value.trim(),pais_iso2:$('companyManualCountry').value.trim().toUpperCase()};if(!row.nombres||!row.apellidos)return toast('Indica nombres y apellidos.',true);if(!row.correo||!row.correo.includes('@'))return toast('Indica un correo válido.',true);if(!confirm(`Se agregará a ${row.nombres} ${row.apellidos} al curso empresarial. Gestión buscará primero su cuenta existente en Moodle y solo creará una si no existe. ¿Continuar?`))return;showLoading(true);try{const response=await academyApi('company_participants_import',{company_course_id:detail.companyCourse.id,participants:[row],origin:'admin'}),result=response.result||{};if(!Number(result.imported||0))throw new Error((result.errors||[]).flatMap(item=>item.errors||[]).join(' · ')||'No fue posible agregar al participante.');await openCompanyCourse(detail.companyCourse.id);await loadCompanies();const preview=await academyApi('company_enrol_preview',{company_course_id:detail.companyCourse.id});if(Number(preview.count||0)===1&&preview.capabilities?.ready){const enrolled=await academyApi('company_enrol',{company_course_id:detail.companyCourse.id,confirmed:true,expected_count:1});await openCompanyCourse(detail.companyCourse.id);await loadCompanies();clearCompanyManualParticipant();const r=enrolled.result||{};toast(`${r.enrolled||0} participante matriculado; ${r.accounts_created||0} cuenta nueva creada; ${r.failed||0} error${Number(r.failed||0)===1?'':'es'}.`,Number(r.failed||0)>0)}else{clearCompanyManualParticipant();toast(`Participante agregado. Hay ${Number(preview.count||0)} pendientes; usa “Matricular pendientes” para procesarlos juntos.`)}}catch(error){toast(error.message,true)}finally{showLoading(false)}}
-    function normalizeCompanyHeader(value){return String(value||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,'')}'''
-          if js_anchor not in text:
-              raise SystemExit('JS anchor not found')
-          text=text.replace(js_anchor,js_new,1)
-
-          event_anchor="$('companyNewBtn').addEventListener('click',()=>showCompanyForm());$('companySearch').addEventListener('input',renderCompanyList);"
-          event_new="$('companyNewBtn').addEventListener('click',()=>showCompanyForm());$('companySearch').addEventListener('input',renderCompanyList);$('companyMoodleSearchBtn').addEventListener('click',searchCompanyMoodleUser);$('companyMoodleLookup').addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();searchCompanyMoodleUser()}});$('companyManualAddBtn').addEventListener('click',addManualCompanyParticipant);$('companyManualClearBtn').addEventListener('click',()=>clearCompanyManualParticipant());"
-          if event_anchor not in text:
-              raise SystemExit('Event anchor not found')
-          text=text.replace(event_anchor,event_new,1)
-
-          p.write_text(text,encoding='utf-8')
-          PY
-      - name: Validate patch
+      - name: Patch index
+        run: python scripts/patch_company_users.py
+      - name: Validate
         run: |
           grep -q 'companyMoodleLookup' index.html
           grep -q 'moodle-company-user-search' index.html
           grep -q 'Agregar participante' index.html
-          python - <<'PY'
-          from pathlib import Path
-          text=Path('index.html').read_text(encoding='utf-8')
-          assert text.count('id="companyMoodleLookup"') == 1
-          assert text.count("function searchCompanyMoodleUser") == 1
-          assert text.count("function addManualCompanyParticipant") == 1
-          PY
-      - name: Commit patch
+      - name: Commit
         run: |
           if git diff --quiet -- index.html; then
             echo "No changes needed"
