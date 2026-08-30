@@ -145,6 +145,35 @@ async function callMoodle(functionName: string, parameters: Record<string, Moodl
   return payload;
 }
 
+async function callMoodlePrimaryRead(functionName: string, parameters: Record<string, MoodleParameter> = {}): Promise<unknown> {
+  const baseUrl = requiredSecret("MOODLE_BASE_URL").replace(/\/+$/, "");
+  const form = new URLSearchParams({
+    wstoken: requiredSecret("MOODLE_TOKEN"),
+    wsfunction: functionName,
+    moodlewsrestformat: "json",
+  });
+  for (const [key, value] of Object.entries(parameters)) form.set(key, String(value));
+  const response = await fetch(`${baseUrl}/webservice/rest/server.php`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
+    body: form,
+    signal: AbortSignal.timeout(30000),
+  });
+  const raw = await response.text();
+  let payload: unknown;
+  try { payload = raw ? JSON.parse(raw) : null; }
+  catch { throw new Error(`Moodle devolvió una respuesta no válida (${response.status}).`); }
+  if (!response.ok) throw new Error(`Moodle respondió HTTP ${response.status}.`);
+  if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+    const error = payload as Record<string, unknown>;
+    if (error.exception || error.errorcode) {
+      const code = String(error.errorcode || error.exception || "moodle_error");
+      throw new Error(`${code}: ${String(error.message || "Moodle rechazó la consulta.")}`);
+    }
+  }
+  return payload;
+}
+
 async function usersByField(field: "id" | "idnumber" | "email", values: Array<string | number>): Promise<Record<string, unknown>[]> {
   const unique = [...new Set(values.map((value) => String(value).trim()).filter(Boolean))];
   if (!unique.length) return [];
@@ -401,7 +430,7 @@ Deno.serve(async (req: Request) => {
 
     const enrolledIds = new Set<number>();
     if (courseId) {
-      const enrolled = asObjects(await callMoodle("core_enrol_get_enrolled_users", { courseid: courseId }));
+      const enrolled = asObjects(await callMoodlePrimaryRead("core_enrol_get_enrolled_users", { courseid: courseId }));
       enrolled.forEach((user) => enrolledIds.add(Number(user.id || 0)));
     }
 

@@ -330,6 +330,13 @@ async function callMoodleRead(
   return callMoodleWithToken(functionName, parameters, token);
 }
 
+async function callMoodlePrimaryRead(
+  functionName: string,
+  parameters: Record<string, MoodleParameter> = {},
+): Promise<unknown> {
+  return callMoodleWithToken(functionName, parameters, requiredSecret("MOODLE_TOKEN"));
+}
+
 function normalizeCourse(course: unknown): JsonObject {
   const item = (course && typeof course === "object" ? course : {}) as Record<string, unknown>;
   return {
@@ -424,7 +431,7 @@ function normalizeEnrolledUser(raw: unknown): JsonObject {
 }
 
 async function getCourseStudents(courseId: number): Promise<JsonObject[]> {
-  const response = await callMoodle("core_enrol_get_enrolled_users", { courseid: courseId });
+  const response = await callMoodlePrimaryRead("core_enrol_get_enrolled_users", { courseid: courseId });
   return asObjects(response)
     .filter(enrolledUserIsStudent)
     .map(normalizeEnrolledUser)
