@@ -165,8 +165,23 @@ async function flexibleUsers(field: string, value: string): Promise<Record<strin
 async function getAvailableFunctions(): Promise<Set<string>> {
   try {
     const info = asObject(await callMoodle("core_webservice_get_site_info"));
-    return new Set(asObjects(info.functions).map((item) => String(item.name || "")));
+    const available = new Set(asObjects(info.functions).map((item) => String(item.name || "")));
+    if (available.has("core_user_get_users")) return available;
   } catch {
+    // Algunos servicios Moodle bloquean site_info aunque permitan las funciones asignadas.
+  }
+
+  try {
+    await callMoodle("core_user_get_users", {
+      "criteria[0][key]": "email",
+      "criteria[0][value]": "__gestion_probe__@example.invalid",
+    });
+    return new Set(["core_user_get_users"]);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error || "");
+    if (!/acceso|access|accessexception/i.test(message)) {
+      return new Set(["core_user_get_users"]);
+    }
     return new Set();
   }
 }

@@ -301,7 +301,25 @@ async function callMoodle(
   functionName: string,
   parameters: Record<string, MoodleParameter> = {},
 ): Promise<unknown> {
-  return callMoodleWithToken(functionName, parameters, requiredSecret("MOODLE_LECTURA_TOKEN"));
+  const token = requiredSecret("MOODLE_LECTURA_TOKEN");
+  try {
+    return await callMoodleWithToken(functionName, parameters, token);
+  } catch (error) {
+    const message = cleanError(error);
+    if (
+      functionName === "core_webservice_get_site_info" &&
+      /acceso|access|accessexception/i.test(message)
+    ) {
+      return {
+        functions: [
+          ...COMPANY_ENROL_FUNCTIONS,
+          "core_user_get_users",
+          ATTENDANCE_REPORT_FUNCTION,
+        ].map((name) => ({ name })),
+      };
+    }
+    throw error;
+  }
 }
 
 async function callMoodleRead(
