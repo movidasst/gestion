@@ -115,7 +115,7 @@ function asObjects(value: unknown): Record<string, unknown>[] {
 async function callMoodle(functionName: string, parameters: Record<string, MoodleParameter> = {}): Promise<unknown> {
   const baseUrl = requiredSecret("MOODLE_BASE_URL").replace(/\/+$/, "");
   const form = new URLSearchParams({
-    wstoken: requiredSecret("MOODLE_TOKEN"),
+    wstoken: requiredSecret("MOODLE_LECTURA_TOKEN"),
     wsfunction: functionName,
     moodlewsrestformat: "json",
   });
