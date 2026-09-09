@@ -1,0 +1,109 @@
+name: Aplicar logo oficial en Gestión
+
+on:
+  push:
+    paths:
+      - '.github/workflows/aplicar-logo-oficial.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update-brand:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Copiar exactamente el logo usado en www.movidasst.com
+        shell: bash
+        run: |
+          mkdir -p assets
+          curl -fsSL 'https://raw.githubusercontent.com/movidasst/principal/main/logo-oficial-movida-sst-plus.png' -o assets/logo-oficial-movida-sst-plus.png
+
+      - name: Actualizar referencias de logo en todas las pantallas y correos
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          official_public = 'https://www.movidasst.com/logo-oficial-movida-sst-plus.png'
+          local_logo = '/assets/logo-oficial-movida-sst-plus.png'
+
+          # Archivos de texto donde puede existir branding o HTML de correo.
+          exts = {'.html','.htm','.js','.mjs','.cjs','.ts','.tsx','.jsx','.css','.json','.md','.yml','.yaml','.sql'}
+          skip_dirs = {'.git','node_modules'}
+
+          replacements = {
+              'https://raw.githubusercontent.com/movidasst/gestion/main/assets/logo-oficial-movida-sst-plus.png': official_public,
+              'https://raw.githubusercontent.com/movidasst/gestion/main/assets/logo-movida-sst-plus.png': official_public,
+              'https://gestion.movidasst.com/assets/logo-oficial-movida-sst-plus.png': official_public,
+              'https://gestion.movidasst.com/assets/logo-movida-sst-plus.png': official_public,
+              'assets/logo-oficial-movida-sst-plus.png': local_logo,
+              'assets/logo-movida-sst-plus.png': local_logo,
+          }
+
+          changed = []
+          for p in Path('.').rglob('*'):
+              if not p.is_file() or p.suffix.lower() not in exts:
+                  continue
+              if any(part in skip_dirs for part in p.parts):
+                  continue
+              try:
+                  text = p.read_text(encoding='utf-8')
+              except UnicodeDecodeError:
+                  continue
+              new = text
+              for old, repl in replacements.items():
+                  new = new.replace(old, repl)
+
+              # En Apps Script y cualquier plantilla de correo, usar URL absoluta pública,
+              # exactamente el mismo archivo que sirve la página principal.
+              if p.name == 'AppsScript_Correo_Actualizado.js':
+                  new = new.replace("const LOGO_URL =\n  '/assets/logo-oficial-movida-sst-plus.png';",
+                                    "const LOGO_URL =\n  'https://www.movidasst.com/logo-oficial-movida-sst-plus.png';")
+                  new = new.replace("const LOGO_URL =\n  'https://gestion.movidasst.com/assets/logo-oficial-movida-sst-plus.png';",
+                                    "const LOGO_URL =\n  'https://www.movidasst.com/logo-oficial-movida-sst-plus.png';")
+
+              # El front de Gestión usa el archivo local copiado desde principal.
+              if p.name == 'index.html':
+                  new = new.replace('src="https://www.movidasst.com/logo-oficial-movida-sst-plus.png"',
+                                    'src="/assets/logo-oficial-movida-sst-plus.png"')
+                  # Agregar favicon/preload si no existen.
+                  if 'rel="icon"' not in new:
+                      needle = '<meta name="description" content="Centro administrativo privado de integrantes de La Movida SST Plus.">'
+                      insert = needle + '\n  <link rel="icon" type="image/png" href="/assets/logo-oficial-movida-sst-plus.png">\n  <link rel="preload" as="image" href="/assets/logo-oficial-movida-sst-plus.png" fetchpriority="high">'
+                      new = new.replace(needle, insert)
+
+              if new != text:
+                  p.write_text(new, encoding='utf-8')
+                  changed.append(str(p))
+
+          print('Archivos actualizados:')
+          for item in changed:
+              print(' -', item)
+          PY
+
+      - name: Verificar referencias finales
+        shell: bash
+        run: |
+          echo '=== LOGOS EN INDEX ==='
+          grep -nEi 'logo-oficial-movida-sst-plus|logo-movida-sst-plus|drive.google.com/thumbnail' index.html || true
+          echo '=== LOGO EN APPS SCRIPT / CORREOS ==='
+          grep -nEi 'LOGO_URL|logo-oficial-movida-sst-plus|logo-movida-sst-plus' AppsScript_Correo_Actualizado.js || true
+          echo '=== REFERENCIAS DE LOGO EN EL RESTO DEL REPO ==='
+          grep -RniE 'logo-oficial-movida-sst-plus|logo-movida-sst-plus|drive.google.com/thumbnail' --exclude-dir=.git --exclude='*.png' . || true
+
+      - name: Commit y push
+        shell: bash
+        run: |
+          git config user.name 'movidasst'
+          git config user.email 'info@movidasst.com'
+          git add assets/logo-oficial-movida-sst-plus.png index.html AppsScript_Correo_Actualizado.js . || true
+          if git diff --cached --quiet; then
+            echo 'No hay cambios pendientes.'
+            exit 0
+          fi
+          git commit -m 'Actualizar logo oficial en todas las pantallas y correos'
+          git push
