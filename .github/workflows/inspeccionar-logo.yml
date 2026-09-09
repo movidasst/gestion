@@ -1,0 +1,23 @@
+name: Inspeccionar referencias de logo
+
+on:
+  push:
+    paths:
+      - '.github/workflows/inspeccionar-logo.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Buscar referencias de logo y correo
+        shell: bash
+        run: |
+          echo '=== REFERENCIAS DE LOGO ==='
+          grep -nEi 'logo|movida-sst-plus\.png|drive\.google\.com/thumbnail' index.html || true
+          echo '=== CORREO / PLANTILLAS ==='
+          grep -nEi 'emailPreview|renderEmail|buildEmail|campaignHeading|campaignBody|plantilla|correo' index.html || true
