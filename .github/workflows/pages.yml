@@ -32,6 +32,18 @@ jobs:
           test -f assets/logo-oficial-movida-sst-plus.png
           test -f gestion-hardening.js
           test -f gestion-academy-v2.js
+          test -f gestion-payments-api-v2.js
+          test -f gestion-payments-v2.js
+          test -f gestion-ux-v2.js
+
+      - name: Validar sintaxis JavaScript
+        shell: bash
+        run: |
+          node --check gestion-hardening.js
+          node --check gestion-academy-v2.js
+          node --check gestion-payments-api-v2.js
+          node --check gestion-payments-v2.js
+          node --check gestion-ux-v2.js
 
       - name: Inyectar mejoras modulares
         shell: bash
@@ -43,6 +55,9 @@ jobs:
           markers = [
               '<script src="gestion-hardening.js" defer></script>',
               '<script src="gestion-academy-v2.js" defer></script>',
+              '<script src="gestion-payments-api-v2.js" defer></script>',
+              '<script src="gestion-payments-v2.js" defer></script>',
+              '<script src="gestion-ux-v2.js" defer></script>',
           ]
           if '</body>' not in s:
               raise SystemExit('No se encontró </body> en index.html')
@@ -58,6 +73,9 @@ jobs:
         run: |
           grep -q 'gestion-hardening.js' index.html
           grep -q 'gestion-academy-v2.js' index.html
+          grep -q 'gestion-payments-api-v2.js' index.html
+          grep -q 'gestion-payments-v2.js' index.html
+          grep -q 'gestion-ux-v2.js' index.html
 
       - name: Configurar GitHub Pages
         uses: actions/configure-pages@v5
