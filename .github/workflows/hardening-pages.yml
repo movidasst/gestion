@@ -33,11 +33,16 @@ jobs:
           from pathlib import Path
           p = Path('index.html')
           s = p.read_text(encoding='utf-8')
-          marker = '<script src="gestion-hardening.js" defer></script>'
-          if marker not in s:
-              if '</body>' not in s:
-                  raise SystemExit('No se encontró </body> en index.html')
-              s = s.replace('</body>', f'  {marker}\n</body>', 1)
+          markers = [
+              '<script src="gestion-hardening.js" defer></script>',
+              '<script src="gestion-academy-v2.js" defer></script>',
+          ]
+          if '</body>' not in s:
+              raise SystemExit('No se encontró </body> en index.html')
+          missing = [m for m in markers if m not in s]
+          if missing:
+              block = ''.join(f'  {m}\n' for m in missing)
+              s = s.replace('</body>', f'{block}</body>', 1)
               p.write_text(s, encoding='utf-8')
           PY
 
