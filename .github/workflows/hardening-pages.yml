@@ -33,7 +33,7 @@ jobs:
           from pathlib import Path
           p = Path('index.html')
           s = p.read_text(encoding='utf-8')
-          marker = '<script src="/gestion-hardening.js" defer></script>'
+          marker = '<script src="gestion-hardening.js" defer></script>'
           if marker not in s:
               if '</body>' not in s:
                   raise SystemExit('No se encontró </body> en index.html')
