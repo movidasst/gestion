@@ -26,6 +26,9 @@ const DIRECTORIO_URL =
 const REGISTRO_URL =
   'https://registro.movidasst.com/';
 
+const GRUPO_INTERNACIONAL_URL =
+  'https://chat.whatsapp.com/DIU1Y140TMn81uTmG4u8OT';
+
 const CORREO_RESPUESTA =
   'info@movidasst.com';
 
@@ -39,7 +42,7 @@ const CONTACTO_VERIFICACION_TELEFONO_VISIBLE =
   '+56 9 6861 5650';
 
 const LOGO_URL =
-  'https://www.movidasst.com/logo-oficial-movida-sst-plus.png';
+  'https://www.movidasst.com/logo-oficial-movida-sst-plus.png?v=20260912';
 
 /**
  * Carpeta de Google Drive donde se guardarán las fotografías.
@@ -1064,6 +1067,12 @@ function enviarCorreoUnicoRegistroMoodle_(datos) {
   const cuentaNueva =
     datos.moodleAccountStatus === 'CREADO';
 
+  const cuentaExistente =
+    datos.moodleAccountStatus === 'EXISTENTE';
+
+  const cuentaPendiente =
+    datos.moodleAccountStatus === 'PENDIENTE_VERIFICACION';
+
   const ubicacion =
     [
       datos.municipio,
@@ -1087,20 +1096,20 @@ function enviarCorreoUnicoRegistroMoodle_(datos) {
     CONTACTO_VERIFICACION_TELEFONO;
 
   const asunto =
-    'Bienvenido a La Movida SST Plus — Tus credenciales están listas';
+    '¡Bienvenido a La Movida SST Plus! Tus accesos están listos';
 
   const textoPlano = [
     'Hola, ' + nombreCompleto + ':',
     '',
     '¡Tu registro en La Movida SST Plus fue completado correctamente!',
     '',
-    'TUS CREDENCIALES',
-    'Usuario: ' + datos.cedula,
-    'Código de registro: ' + datos.codigo,
+    'TUS DATOS DE ACCESO',
+    'Documento de identidad / Usuario: ' + datos.cedula,
+    'Código único / Contraseña inicial: ' + datos.codigo,
     '',
-    'Tu número de cédula y tu código de registro son tus credenciales de acceso al ecosistema de La Movida SST Plus.',
+    'Tu documento de identidad y tu código único son tus credenciales de acceso al ecosistema de La Movida SST Plus.',
     '',
-    'Con estas credenciales puedes acceder al Directorio, actualizar tus datos, consultar tu credencial digital y utilizar los servicios habilitados.',
+    'Con estas credenciales puedes ingresar a la Academia, actualizar tus datos, descargar tu credencial y utilizar los recursos habilitados para integrantes.',
     '',
     'ACADEMIA MOVIDA SST',
     cuentaNueva
@@ -1116,12 +1125,24 @@ function enviarCorreoUnicoRegistroMoodle_(datos) {
       : 'Contraseña Moodle: ' + datos.codigo,
     'Ingresar: ' + moodleUrl,
     '',
-    'DIRECTORIO Y CREDENCIAL',
+    'COMUNIDAD INTERNACIONAL',
+    'Únete al grupo para participar en actividades, intercambiar experiencias y recibir información de la comunidad.',
+    'Grupo de WhatsApp: ' + GRUPO_INTERNACIONAL_URL,
+    '',
+    'DIRECTORIO INTERNACIONAL Y CREDENCIAL',
     'Ver o validar credencial: ' + credentialUrl,
-    'Directorio nacional: ' + DIRECTORIO_URL,
+    'Directorio Internacional: ' + DIRECTORIO_URL,
     ubicacion
       ? 'Ubicación registrada: ' + ubicacion
       : '',
+    '',
+    'BENEFICIOS DE SER INTEGRANTE',
+    '- Perfil en el Directorio Internacional de Profesionales SST.',
+    '- Credencial digital descargable y datos actualizables.',
+    '- Acceso a la Academia, aplicaciones, guías y simuladores.',
+    '- Participación en actividades y puntos para tu ranking.',
+    '- Acceso a los grupos de aprendizaje colaborativo.',
+    'Explorar el ecosistema: https://www.movidasst.com/',
     '',
     'IMPORTANTE — CONTACTO OFICIAL PARA VERIFICACIÓN',
     'Guarda en tus contactos a:',
@@ -1140,8 +1161,8 @@ function enviarCorreoUnicoRegistroMoodle_(datos) {
 
   const preheader =
     cuentaPendiente
-      ? 'Tu registro está listo. Recibe tu cédula y código aunque tu cuenta Moodle aún esté en proceso de vinculación.'
-      : 'Tu cédula y código de registro son ahora tus credenciales unificadas de La Movida SST Plus.';
+      ? 'Tu registro está listo. Recibe tu documento y código aunque tu cuenta Moodle aún esté en proceso de vinculación.'
+      : 'Tu documento y código único son ahora tus credenciales unificadas de La Movida SST Plus.';
 
   const htmlBody = `<!doctype html>
 <html lang="es">
@@ -1210,12 +1231,12 @@ function enviarCorreoUnicoRegistroMoodle_(datos) {
             <td
               style="
                 height:7px;
-                background:#00247d;
+                background:#007b85;
                 background:linear-gradient(
                   90deg,
-                  #ffcc00 0 33.33%,
-                  #00247d 33.33% 66.66%,
-                  #cf142b 66.66%
+                  #007b85 0 45%,
+                  #00205b 45% 78%,
+                  #70ad47 78%
                 );
                 font-size:0;
                 line-height:0;
@@ -1241,13 +1262,13 @@ function enviarCorreoUnicoRegistroMoodle_(datos) {
             >
               <img
                 src="${LOGO_URL}"
-                width="76"
-                height="76"
+                width="92"
+                height="92"
                 alt="La Movida SST Plus"
                 style="
                   display:block;
-                  width:76px;
-                  height:76px;
+                  width:92px;
+                  height:92px;
                   border-radius:50%;
                   border:4px solid rgba(255,255,255,.95);
                   box-shadow:0 6px 18px rgba(0,0,0,.22);
@@ -1264,7 +1285,7 @@ function enviarCorreoUnicoRegistroMoodle_(datos) {
                   color:#ffffff;
                 "
               >
-                La Movida SST Plus
+                La Movida de SST Plus
               </div>
 
               <div
@@ -1409,12 +1430,57 @@ function enviarCorreoUnicoRegistroMoodle_(datos) {
                         color:#64748b;
                       "
                     >
-                      Tu número de cédula y este código de registro son tus
-                      credenciales de acceso a La Movida SST Plus. Úsalos para
-                      ingresar al Directorio, actualizar tus datos y consultar
-                      tu credencial. Cuando Moodle esté vinculado, el mismo
-                      código será también tu contraseña de la Academia.
+                      Tu documento de identidad y este código único son tus
+                      datos de acceso a La Movida SST Plus. El documento funciona
+                      como usuario y el código como contraseña inicial. Úsalos
+                      para ingresar a la Academia, actualizar tus datos y
+                      consultar o descargar tu credencial de integrante.
                     </div>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <tr>
+            <td style="padding:18px 25px 5px;">
+              <table
+                role="presentation"
+                width="100%"
+                cellspacing="0"
+                cellpadding="0"
+                border="0"
+                style="
+                  width:100%;
+                  background:#eefbf3;
+                  border:1px solid #9ed8b1;
+                  border-radius:18px;
+                "
+              >
+                <tr>
+                  <td align="center" style="padding:19px 17px;">
+                    <div style="color:#075e54;font-size:15px;font-weight:900;">
+                      Grupo La Movida SST Internacional
+                    </div>
+                    <div style="margin-top:7px;color:#475569;font-size:13px;line-height:1.6;">
+                      Participa en las actividades, comparte experiencias y recibe información de nuestra comunidad profesional.
+                    </div>
+                    <a
+                      href="${GRUPO_INTERNACIONAL_URL}"
+                      style="
+                        display:inline-block;
+                        margin-top:14px;
+                        padding:12px 18px;
+                        border-radius:11px;
+                        background:#25d366;
+                        color:#ffffff;
+                        text-decoration:none;
+                        font-size:13px;
+                        font-weight:800;
+                      "
+                    >
+                      Unirme al grupo de WhatsApp
+                    </a>
                   </td>
                 </tr>
               </table>
@@ -1534,7 +1600,7 @@ function enviarCorreoUnicoRegistroMoodle_(datos) {
                             "
                           >
                             Detectamos que este correo ya existe en Moodle,
-                            pero la cuenta todavía no contiene una cédula o
+                            pero la cuenta todavía no contiene un documento o
                             ID coincidente que permita vincularla con seguridad.
                             Tu registro está completo y tu código ya funciona
                             para el Directorio y los demás servicios. Mientras
@@ -1607,7 +1673,7 @@ function enviarCorreoUnicoRegistroMoodle_(datos) {
                         font-weight:900;
                       "
                     >
-                      Directorio y credencial digital
+                      Directorio Internacional y credencial digital
                     </div>
 
                     <div
@@ -1618,8 +1684,9 @@ function enviarCorreoUnicoRegistroMoodle_(datos) {
                         color:#64748b;
                       "
                     >
-                      Usa tu cédula y el mismo código para consultar,
-                      actualizar tus datos y gestionar tu credencial.
+                      Forma parte de la Red Internacional de Profesionales SST.
+                      Usa tu documento y el mismo código para consultar o
+                      actualizar tus datos y descargar tu credencial.
                     </div>
 
                     ${
@@ -1667,6 +1734,73 @@ function enviarCorreoUnicoRegistroMoodle_(datos) {
               >
                 Ver y descargar mi credencial
               </a>
+            </td>
+          </tr>
+
+          <tr>
+            <td style="padding:18px 25px 5px;">
+              <table
+                role="presentation"
+                width="100%"
+                cellspacing="0"
+                cellpadding="0"
+                border="0"
+                style="
+                  width:100%;
+                  background:#eef8f4;
+                  border:1px solid #b8dfca;
+                  border-radius:18px;
+                "
+              >
+                <tr>
+                  <td style="padding:19px 18px;">
+                    <div
+                      style="
+                        color:#00205b;
+                        font-size:14px;
+                        font-weight:900;
+                        text-transform:uppercase;
+                        letter-spacing:.45px;
+                      "
+                    >
+                      Todo lo que tienes como integrante
+                    </div>
+
+                    <div
+                      style="
+                        margin-top:10px;
+                        color:#475569;
+                        font-size:13px;
+                        line-height:1.75;
+                      "
+                    >
+                      ✓ Perfil en el Directorio Internacional de Profesionales SST.<br>
+                      ✓ Credencial digital descargable y datos siempre actualizables.<br>
+                      ✓ Acceso a la Academia, aplicaciones, guías y simuladores.<br>
+                      ✓ Participación en actividades y puntos para tu ranking.<br>
+                      ✓ Grupos internacionales de aprendizaje colaborativo.
+                    </div>
+
+                    <div style="margin-top:15px;text-align:center;">
+                      <a
+                        href="https://www.movidasst.com/"
+                        style="
+                          display:inline-block;
+                          padding:12px 19px;
+                          border-radius:11px;
+                          background:#007b85;
+                          color:#ffffff;
+                          text-decoration:none;
+                          font-size:13px;
+                          font-weight:800;
+                        "
+                      >
+                        Explorar todos los recursos
+                      </a>
+                    </div>
+                  </td>
+                </tr>
+              </table>
             </td>
           </tr>
 
@@ -1831,7 +1965,7 @@ function enviarCorreoUnicoRegistroMoodle_(datos) {
                   font-weight:800;
                 "
               >
-                La Movida SST Plus · Venezuela
+                La Movida de SST Plus · Red Internacional
               </div>
 
               <div
@@ -1860,7 +1994,7 @@ function enviarCorreoUnicoRegistroMoodle_(datos) {
                     font-weight:700;
                   "
                 >
-                  Directorio nacional
+                  Directorio Internacional
                 </a>
 
                 <span style="color:#cbd5e1;"> · </span>
