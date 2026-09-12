@@ -1,0 +1,56 @@
+name: Aplicar mejoras seguras a Gestión
+
+on:
+  workflow_run:
+    workflows: ["Publicar Centro de Gestión"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages-hardening
+  cancel-in-progress: true
+
+jobs:
+  harden:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Inyectar mejoras sin modificar el index fuente
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('index.html')
+          s = p.read_text(encoding='utf-8')
+          marker = '<script src="/gestion-hardening.js" defer></script>'
+          if marker not in s:
+              if '</body>' not in s:
+                  raise SystemExit('No se encontró </body> en index.html')
+              s = s.replace('</body>', f'  {marker}\n</body>', 1)
+              p.write_text(s, encoding='utf-8')
+          PY
+
+      - name: Configurar GitHub Pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - name: Preparar sitio
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: .
+
+      - name: Publicar capa mejorada
+        id: deployment
+        uses: actions/deploy-pages@v4
