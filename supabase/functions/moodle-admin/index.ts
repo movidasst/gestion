@@ -2206,6 +2206,73 @@ Deno.serve(async (req: Request) => {
       return json(req, { ok: true, courses, total: courses.length });
     }
 
+    if (action === "sync_incidents") {
+      const { data, error } = await admin
+        .from("integrantes")
+        .select("id,nombres,apellidos,documento,correo,pais_iso2,moodle_sync_status,moodle_sync_attempts,moodle_sync_error,moodle_last_attempt_at")
+        .eq("moodle_sync_status", "ERROR")
+        .order("moodle_last_attempt_at", { ascending: false, nullsFirst: false })
+        .limit(100);
+      if (error) throw new Error(`No se pudieron consultar las incidencias Moodle: ${error.message}`);
+      return json(req, { ok: true, incidents: data || [] });
+    }
+
+    if (action === "retry_moodle_sync") {
+      const integranteId = positiveInteger(body.integrante_id, "El integrante");
+      const { data: member, error: memberError } = await admin
+        .from("integrantes")
+        .select("id,nombres,apellidos,documento,correo,moodle_user_id,moodle_sync_status,moodle_sync_error")
+        .eq("id", integranteId)
+        .maybeSingle();
+      if (memberError) throw new Error(`No se pudo consultar el integrante: ${memberError.message}`);
+      if (!member) throw new Error("El integrante no existe.");
+
+      if (member.moodle_user_id && ["CREADO", "EXISTENTE"].includes(String(member.moodle_sync_status || ""))) {
+        return json(req, { ok: true, result: "ALREADY_SYNCED", message: "La cuenta ya está vinculada correctamente.", member });
+      }
+
+      if (String(member.moodle_sync_error || "").includes("integrantes_moodle_user_id_unico")) {
+        throw new Error("No es seguro reintentar automáticamente: esa cuenta Moodle ya está vinculada a otro integrante. Revisa ambas identidades antes de cambiar la vinculación.");
+      }
+
+      let responsePayload: JsonObject = {};
+      try {
+        const response = await fetch(`${supabaseUrl.replace(/\/+$/, "")}/functions/v1/smooth-endpoint`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-webhook-secret": requiredSecret("MOODLE_WEBHOOK_SECRET"),
+          },
+          body: JSON.stringify({ action: "manual", integrante_id: integranteId }),
+          signal: AbortSignal.timeout(90000),
+        });
+        responsePayload = await response.json().catch(() => ({})) as JsonObject;
+        if (!response.ok || responsePayload.ok !== true) {
+          throw new Error(String(responsePayload.error || `La sincronización respondió HTTP ${response.status}.`));
+        }
+        await audit(admin, {
+          admin_user_id: adminUserId,
+          accion: "CREAR_VINCULAR_USUARIO",
+          integrante_id: integranteId,
+          moodle_user_id: Number(responsePayload.moodle_user_id || 0) || null,
+          detalle: { origen: "reintento_incidencias", resultado: responsePayload.result || null },
+          resultado: "OK",
+        });
+        return json(req, { ok: true, ...responsePayload });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        await audit(admin, {
+          admin_user_id: adminUserId,
+          accion: "CREAR_VINCULAR_USUARIO",
+          integrante_id: integranteId,
+          detalle: { origen: "reintento_incidencias" },
+          resultado: "ERROR",
+          error: message,
+        });
+        throw new Error(message);
+      }
+    }
+
     if (action === "summary") {
       const [courses, siteInfo, linked, pending, grades, passed] = await Promise.all([
         getCourses(),
