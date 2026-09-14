@@ -2214,7 +2214,48 @@ Deno.serve(async (req: Request) => {
         .order("moodle_last_attempt_at", { ascending: false, nullsFirst: false })
         .limit(100);
       if (error) throw new Error(`No se pudieron consultar las incidencias Moodle: ${error.message}`);
-      return json(req, { ok: true, incidents: data || [] });
+
+      const incidents = await Promise.all((data || []).map(async (incident) => {
+        const technicalError = String(incident.moodle_sync_error || "");
+        if (!technicalError.includes("integrantes_moodle_user_id_unico")) return incident;
+        try {
+          let users = incident.documento
+            ? await getMoodleUsersByField("idnumber", [String(incident.documento)])
+            : [];
+          if (!users.length && incident.correo) {
+            users = await getMoodleUsersByField("email", [String(incident.correo).trim().toLowerCase()]);
+          }
+          const moodleUserId = Number(users[0]?.id || 0);
+          if (!(moodleUserId > 0)) return { ...incident, diagnosis: "No se localizó la cuenta Moodle relacionada." };
+          const { data: linked, error: linkedError } = await admin
+            .from("integrantes")
+            .select("id,nombres,apellidos,documento,correo,moodle_user_id")
+            .eq("moodle_user_id", moodleUserId)
+            .neq("id", incident.id)
+            .maybeSingle();
+          if (linkedError) throw linkedError;
+          return {
+            ...incident,
+            conflict: linked ? {
+              id: linked.id,
+              nombres: linked.nombres,
+              apellidos: linked.apellidos,
+              documento: linked.documento,
+              correo: linked.correo,
+              moodle_user_id: linked.moodle_user_id,
+            } : null,
+            diagnosis: linked
+              ? "La cuenta Moodle está vinculada a otra ficha."
+              : "La cuenta Moodle fue localizada, pero no aparece vinculada a otra ficha activa.",
+          };
+        } catch (diagnosisError) {
+          return {
+            ...incident,
+            diagnosis: `No fue posible completar el diagnóstico: ${diagnosisError instanceof Error ? diagnosisError.message : String(diagnosisError)}`,
+          };
+        }
+      }));
+      return json(req, { ok: true, incidents });
     }
 
     if (action === "retry_moodle_sync") {
