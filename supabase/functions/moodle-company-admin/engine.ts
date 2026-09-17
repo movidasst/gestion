@@ -2289,6 +2289,19 @@ Deno.serve(async (req: Request) => {
       });
     }
 
+    if (action === "company_delete") {
+      const companyId = optionalUuid(body.company_id, "La empresa");
+      if (!companyId) throw new Error("Selecciona la empresa.");
+      if (body.confirmed !== true) throw new Error("Confirma la eliminación de la empresa.");
+      const { data: result, error } = await admin.rpc("academia_eliminar_empresa", {
+        p_empresa_id: companyId,
+        p_admin_user_id: adminUserId,
+        p_nombre_confirmado: String(body.confirmation_name || ""),
+      });
+      if (error) throw new Error(error.message);
+      return json(req, { ok: true, result });
+    }
+
     if (action === "company_save") {
       const companyId = optionalUuid(body.company_id, "La empresa");
       const name = cleanText(body.nombre, 180);
