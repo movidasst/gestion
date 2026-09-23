@@ -20,7 +20,7 @@
       .incident-card.danger{border-color:#ffd3da;background:#fff7f8}.incident-card.warn{border-color:#ffe4a8;background:#fffbef}
       .incident-modal{position:fixed;z-index:180;inset:5vh max(8px,calc((100vw - 980px)/2));background:#fff;border-radius:24px;box-shadow:0 30px 90px rgba(0,32,91,.34);display:none;flex-direction:column;overflow:hidden}
       .incident-modal.show{display:flex}.incident-modal-head{padding:14px 16px;border-bottom:1px solid #dce7eb;display:flex;align-items:center;gap:10px}.incident-modal-head h3{margin:0;color:#00205b}.incident-modal-head button{margin-left:auto}
-      .incident-modal-body{overflow:auto;padding:12px}.incident-row{border:1px solid #dce7eb;border-radius:15px;padding:12px;margin-bottom:8px;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:start}.incident-row h4{margin:0;color:#00205b}.incident-row p{margin:4px 0;color:#647b8d;font-size:.73rem;word-break:break-word}.incident-error{color:#a92c40!important;font-weight:700}
+      .incident-modal-body{overflow:auto;padding:12px}.incident-row{border:1px solid #dce7eb;border-radius:15px;padding:12px;margin-bottom:8px;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:start}.incident-row h4{margin:0;color:#00205b}.incident-row p{margin:4px 0;color:#647b8d;font-size:.73rem;word-break:break-word}.incident-error{color:#a92c40!important;font-weight:700}.incident-guide{margin-top:10px;padding:10px;border:1px solid #e5edf0;border-radius:12px;background:#f8fbfc}.incident-guide strong{display:block;color:#00205b;margin-bottom:3px}.incident-guide p{margin:0 0 8px}.incident-guide p:last-child{margin-bottom:0}.incident-compare{display:flex;gap:8px;flex-wrap:wrap;margin-top:7px}.incident-compare span{padding:5px 8px;border-radius:9px;background:#eef5f7;font-size:.68rem;font-weight:800;color:#28445b}
       .hardening-help{margin-top:6px;color:#647b8d;font-size:.7rem;line-height:1.4}
       @media(max-width:900px){.incident-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
       @media(max-width:640px){
@@ -91,6 +91,109 @@
     }
   }
 
+  function incidentLinkedMemberId(row) {
+    const match = String(row?.moodle_pending_reason || '').match(/integrante\s+#(\d+)/i);
+    return match ? Number(match[1]) : 0;
+  }
+
+  function incidentGuidance(row) {
+    const status = String(row?.moodle_sync_status || '').toUpperCase();
+    const reason = String(row?.moodle_pending_reason || row?.moodle_sync_error || '').trim();
+    const candidateId = Number(row?.moodle_pending_user_id || 0);
+    const linkedMemberId = incidentLinkedMemberId(row);
+    const document = String(row?.documento || '').trim();
+    const moodleUsername = String(row?.moodle_pending_username || '').trim();
+
+    if (status === 'PENDIENTE' || status === 'PROCESANDO') {
+      return {
+        what: Number(row?.moodle_sync_attempts || 0) === 0
+          ? 'La ficha quedó pendiente y nunca llegó a ejecutar la creación o vinculación con Moodle.'
+          : 'La sincronización quedó pendiente o en proceso y necesita reintentarse.',
+        how: 'Pulsa “Procesar ahora”. Gestión buscará primero si la persona ya existe en Moodle y, si no existe, seguirá el flujo normal de creación.',
+        action: 'retry'
+      };
+    }
+
+    if (status === 'PENDIENTE_VERIFICACION' && linkedMemberId) {
+      return {
+        what: `La cuenta Moodle #${candidateId || '—'} ya está vinculada a otra ficha (#${linkedMemberId}). El sistema bloqueó el vínculo para evitar dos integrantes usando la misma cuenta.`,
+        how: 'Compara ambas fichas. Si son la misma persona, hay que fusionar el duplicado y conservar una sola ficha. Si son personas distintas, no se debe mover el ID Moodle.',
+        action: 'compare',
+        linkedMemberId
+      };
+    }
+
+    if (status === 'PENDIENTE_VERIFICACION' && candidateId) {
+      return {
+        what: 'El correo coincide con una cuenta Moodle, pero el documento registrado en Gestión no coincide exactamente con el usuario/documento de Moodle.',
+        how: 'Comprueba que el correo y la persona sean correctos. Si confirmas que es la misma persona, “Confirmar vínculo” asignará ese ID a la ficha en Supabase sin modificar la cuenta Moodle.',
+        action: 'confirm'
+      };
+    }
+
+    if (status === 'NO_ENCONTRADO') {
+      return {
+        what: 'La conciliación no encontró una cuenta Moodle por documento, usuario ni correo.',
+        how: 'Revisa primero documento y correo. Si son correctos, la cuenta puede crearse mediante el flujo normal de sincronización.',
+        action: 'none'
+      };
+    }
+
+    if (status === 'ERROR') {
+      return {
+        what: reason || 'La sincronización devolvió un error técnico.',
+        how: 'Abre la ficha y revisa el detalle técnico. Si el ID Moodle ya está usado por otra ficha, compara ambas antes de hacer cambios.',
+        action: 'none'
+      };
+    }
+
+    return {
+      what: reason || 'El caso necesita revisión administrativa.',
+      how: 'Abre la ficha, comprueba documento, correo y vínculo Moodle antes de modificarla.',
+      action: 'none'
+    };
+  }
+
+  async function processPendingIncident(id, button) {
+    if (!confirm('Se ejecutará el flujo normal de Moodle para esta persona: primero buscará una cuenta existente y, si no existe, podrá crearla. ¿Continuar?')) return;
+    button.disabled = true;
+    try {
+      await academyApi('retry_moodle_sync', { integrante_id: id });
+      if (typeof toast === 'function') toast('Sincronización Moodle procesada.');
+      await refreshIncidents();
+      await openIncidentDetail('PENDIENTE');
+      try { if (typeof loadMembers === 'function') await loadMembers(); } catch (e) { console.warn(e); }
+    } catch (error) {
+      if (typeof toast === 'function') toast(error.message || 'No fue posible procesar la sincronización.', true);
+      button.disabled = false;
+    }
+  }
+
+  async function confirmIncidentMoodleLink(row, button) {
+    const candidateId = Number(row?.moodle_pending_user_id || 0);
+    if (!candidateId) return;
+    const currentDocument = String(row?.documento || '—');
+    const moodleUsername = String(row?.moodle_pending_username || '—');
+    const email = String(row?.correo || row?.moodle_pending_email || '—');
+    const message = `Confirma que esta es la misma persona.\n\nGestión: documento ${currentDocument}\nMoodle: usuario/documento ${moodleUsername}\nCorreo coincidente: ${email}\n\nSe vinculará Moodle #${candidateId} en Supabase. NO se modificará la cuenta Moodle. ¿Continuar?`;
+    if (!confirm(message)) return;
+
+    button.disabled = true;
+    try {
+      await academyApi('confirm_moodle_link', {
+        integrante_id: Number(row.id),
+        moodle_user_id: candidateId
+      });
+      if (typeof toast === 'function') toast(`Moodle #${candidateId} vinculado correctamente.`);
+      await refreshIncidents();
+      await openIncidentDetail('PENDIENTE_VERIFICACION');
+      try { if (typeof loadMembers === 'function') await loadMembers(); } catch (e) { console.warn(e); }
+    } catch (error) {
+      if (typeof toast === 'function') toast(error.message || 'No fue posible confirmar el vínculo.', true);
+      button.disabled = false;
+    }
+  }
+
   async function openIncidentDetail(status) {
     if (typeof sb === 'undefined') return;
     const labels = {NO_SOLICITADO:'Históricos por reconciliar',PENDIENTE:'Pendientes / procesando',PENDIENTE_VERIFICACION:'Pendientes de verificación',NO_ENCONTRADO:'No encontrados en Moodle',ERROR:'Errores Moodle',SIN_ID:'Creado/existente sin ID'};
@@ -104,19 +207,42 @@
       if (error) throw error;
       const rows = data || [];
       q('incidentModalSubtitle').textContent = `${nf(rows.length)} registro${rows.length === 1 ? '' : 's'} mostrado${rows.length === 1 ? '' : 's'}`;
-      q('incidentModalBody').innerHTML = rows.length ? rows.map((r) => `
+      q('incidentModalBody').innerHTML = rows.length ? rows.map((r) => {
+        const guide = incidentGuidance(r);
+        const linkedId = Number(guide.linkedMemberId || 0);
+        const compare = r.moodle_pending_user_id ? `<div class="incident-compare"><span>Gestión: ${escapeHtml(r.documento || '—')}</span><span>Moodle: ${escapeHtml(r.moodle_pending_username || 'sin usuario visible')}</span><span>ID Moodle: #${escapeHtml(r.moodle_pending_user_id)}</span></div>` : '';
+        const actions = [
+          `<button class="btn btn-secondary" data-open-member="${Number(r.id)}"><i class="fa-solid fa-address-card"></i> Abrir ficha</button>`,
+          guide.action === 'retry' ? `<button class="btn btn-warning" data-process-pending="${Number(r.id)}"><i class="fa-solid fa-rotate-right"></i> Procesar ahora</button>` : '',
+          guide.action === 'confirm' ? `<button class="btn btn-primary" data-confirm-link="${Number(r.id)}"><i class="fa-solid fa-link"></i> Confirmar vínculo</button>` : '',
+          linkedId ? `<button class="btn btn-secondary" data-open-linked="${linkedId}"><i class="fa-solid fa-code-compare"></i> Abrir ficha #${linkedId}</button>` : ''
+        ].filter(Boolean).join('');
+        return `
         <article class="incident-row">
           <div><h4>${escapeHtml(`${r.nombres || ''} ${r.apellidos || ''}`.trim() || `Integrante #${r.id}`)}</h4>
           <p>${escapeHtml(r.documento || 'Sin documento')} · ${escapeHtml(r.correo || 'Sin correo')} · ${escapeHtml(r.codigo_integrante || '')}</p>
-          <p><b>${escapeHtml(r.moodle_sync_status || 'Sin estado')}</b>${r.moodle_pending_user_id ? ` · Moodle pendiente #${escapeHtml(r.moodle_pending_user_id)}` : ''}</p>
-          ${r.moodle_sync_error ? `<p class="incident-error">${escapeHtml(r.moodle_sync_error)}</p>` : ''}
-          ${r.moodle_pending_reason ? `<p>${escapeHtml(r.moodle_pending_reason)}</p>` : ''}</div>
-          <button class="btn btn-secondary" data-open-member="${Number(r.id)}"><i class="fa-solid fa-address-card"></i> Abrir ficha</button>
-        </article>`).join('') : '<div class="empty"><i class="fa-solid fa-circle-check"></i>No hay incidencias en este estado.</div>';
+          <p><b>${escapeHtml(r.moodle_sync_status || 'Sin estado')}</b>${r.moodle_pending_user_id ? ` · Moodle candidato #${escapeHtml(r.moodle_pending_user_id)}` : ''}</p>
+          ${compare}
+          <div class="incident-guide"><strong>¿Qué pasó?</strong><p>${escapeHtml(guide.what)}</p><strong>¿Cómo resolverlo?</strong><p>${escapeHtml(guide.how)}</p></div>
+          ${r.moodle_sync_error ? `<details class="incident-technical"><summary>Ver detalle técnico</summary><code>${escapeHtml(r.moodle_sync_error)}</code></details>` : ''}
+          </div>
+          <div class="incident-actions">${actions}</div>
+        </article>`;
+      }).join('') : '<div class="empty"><i class="fa-solid fa-circle-check"></i>No hay incidencias en este estado.</div>';
       q('incidentModalBody').querySelectorAll('[data-open-member]').forEach((btn) => btn.addEventListener('click', () => {
         const id = Number(btn.dataset.openMember);
         closeIncidentDetail();
         try { if (typeof openMember === 'function') openMember(id); } catch (e) { console.warn(e); }
+      }));
+      q('incidentModalBody').querySelectorAll('[data-open-linked]').forEach((btn) => btn.addEventListener('click', () => {
+        const id = Number(btn.dataset.openLinked);
+        closeIncidentDetail();
+        try { if (typeof openMember === 'function') openMember(id); } catch (e) { console.warn(e); }
+      }));
+      q('incidentModalBody').querySelectorAll('[data-process-pending]').forEach((btn) => btn.addEventListener('click', () => processPendingIncident(Number(btn.dataset.processPending), btn)));
+      q('incidentModalBody').querySelectorAll('[data-confirm-link]').forEach((btn) => btn.addEventListener('click', () => {
+        const row = rows.find((item) => Number(item.id) === Number(btn.dataset.confirmLink));
+        if (row) confirmIncidentMoodleLink(row, btn);
       }));
     } catch (error) {
       q('incidentModalBody').innerHTML = `<div class="empty"><i class="fa-solid fa-triangle-exclamation"></i>${escapeHtml(error.message || 'No se pudo consultar la incidencia.')}</div>`;
