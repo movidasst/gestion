@@ -698,7 +698,7 @@
     sb.auth.onAuthStateChange((event)=>{if(event==='SIGNED_OUT')showLogin()});
     (async()=>{showLoading(true);try{if(await ensureAdmin())await loadAll()}finally{showLoading(false)}})();
   </script>
-  <script src="gestion-hardening.js" defer></script>
+  <script src="gestion-hardening.js?v=20260923-1841" defer></script>
   <script src="gestion-academy-v2.js" defer></script>
   <script src="gestion-payments-v2.js" defer></script>
   <script src="gestion-ux-v2.js" defer></script>
