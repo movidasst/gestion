@@ -3,3 +3,6 @@ verify_jwt = true
 
 [functions.moodle-feedback-analytics]
 verify_jwt = true
+
+[functions.moodle-payments-v2]
+verify_jwt = true
