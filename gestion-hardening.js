@@ -20,7 +20,7 @@
       .incident-card.danger{border-color:#ffd3da;background:#fff7f8}.incident-card.warn{border-color:#ffe4a8;background:#fffbef}
       .incident-modal{position:fixed;z-index:180;inset:5vh max(8px,calc((100vw - 980px)/2));background:#fff;border-radius:24px;box-shadow:0 30px 90px rgba(0,32,91,.34);display:none;flex-direction:column;overflow:hidden}
       .incident-modal.show{display:flex}.incident-modal-head{padding:14px 16px;border-bottom:1px solid #dce7eb;display:flex;align-items:center;gap:10px}.incident-modal-head h3{margin:0;color:#00205b}.incident-modal-head button{margin-left:auto}
-      .incident-modal-body{overflow:auto;padding:12px}.incident-row{border:1px solid #dce7eb;border-radius:15px;padding:12px;margin-bottom:8px;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:start}.incident-row h4{margin:0;color:#00205b}.incident-row p{margin:4px 0;color:#647b8d;font-size:.73rem;word-break:break-word}.incident-error{color:#a92c40!important;font-weight:700}.incident-guide{margin-top:10px;padding:10px;border:1px solid #e5edf0;border-radius:12px;background:#f8fbfc}.incident-guide strong{display:block;color:#00205b;margin-bottom:3px}.incident-guide p{margin:0 0 8px}.incident-guide p:last-child{margin-bottom:0}.incident-compare{display:flex;gap:8px;flex-wrap:wrap;margin-top:7px}.incident-compare span{padding:5px 8px;border-radius:9px;background:#eef5f7;font-size:.68rem;font-weight:800;color:#28445b}
+      .incident-modal-body{overflow:auto;padding:12px}.incident-row{border:1px solid #dce7eb;border-radius:15px;padding:12px;margin-bottom:8px;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:start}.incident-row h4{margin:0;color:#00205b}.incident-row p{margin:4px 0;color:#647b8d;font-size:.73rem;word-break:break-word}.incident-error{color:#a92c40!important;font-weight:700}.incident-guide{margin-top:10px;padding:10px;border:1px solid #e5edf0;border-radius:12px;background:#f8fbfc}.incident-guide strong{display:block;color:#00205b;margin-bottom:3px}.incident-guide p{margin:0 0 8px}.incident-guide p:last-child{margin-bottom:0}.incident-compare{display:flex;gap:8px;flex-wrap:wrap;margin-top:7px}.incident-compare span{padding:5px 8px;border-radius:9px;background:#eef5f7;font-size:.68rem;font-weight:800;color:#28445b}.incident-all-section{margin-bottom:16px}.incident-all-section:last-child{margin-bottom:0}.incident-all-title{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0 0 8px;padding:8px 2px;color:#00205b}.incident-all-title h4{margin:0;font-size:.9rem}.incident-all-count{min-width:30px;text-align:center;padding:4px 8px;border-radius:999px;background:#eef5f7;font-weight:900;color:#00205b}.incident-mail-row{border:1px solid #dce7eb;border-radius:14px;padding:11px;margin-bottom:8px;background:#fff}.incident-mail-row b{color:#00205b}.incident-mail-row p{margin:4px 0;color:#647b8d;font-size:.73rem}
       .hardening-help{margin-top:6px;color:#647b8d;font-size:.7rem;line-height:1.4}
       @media(max-width:900px){.incident-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
       @media(max-width:640px){
@@ -78,8 +78,29 @@
       q('incError').textContent = nf(data.moodle_error);
       q('incSinId').textContent = nf(data.moodle_sin_id);
       const historical = Number(data.moodle_no_solicitado || 0);
-      const unresolved = Number(data.moodle_no_encontrado || 0) + Number(data.moodle_pendiente || 0) + Number(data.moodle_verificacion || 0) + Number(data.moodle_error || 0) + Number(data.moodle_sin_id || 0) + Number(data.correos_pendientes || 0) + Number(data.correos_fallidos || 0);
+      const categories = {
+        pendientes: Number(data.moodle_pendiente || 0),
+        verificacion: Number(data.moodle_verificacion || 0),
+        noEncontrado: Number(data.moodle_no_encontrado || 0),
+        errores: Number(data.moodle_error || 0),
+        sinId: Number(data.moodle_sin_id || 0),
+        correosPendientes: Number(data.correos_pendientes || 0),
+        correosFallidos: Number(data.correos_fallidos || 0)
+      };
+      const unresolved = Object.values(categories).reduce((sum, value) => sum + value, 0);
       if (q('statProcesses')) q('statProcesses').textContent = nf(unresolved);
+      if (q('processesCard')) {
+        const parts = [];
+        if (categories.pendientes) parts.push(`${nf(categories.pendientes)} pendientes Moodle`);
+        if (categories.verificacion) parts.push(`${nf(categories.verificacion)} por verificar`);
+        if (categories.noEncontrado) parts.push(`${nf(categories.noEncontrado)} no encontrados`);
+        if (categories.errores) parts.push(`${nf(categories.errores)} errores Moodle`);
+        if (categories.sinId) parts.push(`${nf(categories.sinId)} sin ID`);
+        if (categories.correosPendientes) parts.push(`${nf(categories.correosPendientes)} correos pendientes`);
+        if (categories.correosFallidos) parts.push(`${nf(categories.correosFallidos)} correos fallidos`);
+        q('processesCard').title = parts.length ? parts.join(' · ') : 'No hay incidencias activas';
+        q('processesCard').setAttribute('aria-label', unresolved ? `Ver ${nf(unresolved)} incidencias activas` : 'No hay incidencias activas');
+      }
       if (q('reconcileHistoricalBtn')) {
         q('reconcileHistoricalBtn').disabled = historical === 0;
         q('reconcileHistoricalBtn').title = historical ? `${nf(historical)} históricos pendientes de comparar con Moodle` : 'No hay históricos pendientes de reconciliar';
@@ -247,6 +268,129 @@
     } catch (error) {
       q('incidentModalBody').innerHTML = `<div class="empty"><i class="fa-solid fa-triangle-exclamation"></i>${escapeHtml(error.message || 'No se pudo consultar la incidencia.')}</div>`;
     }
+  }
+
+  function renderUnifiedMoodleIncident(row) {
+    const guide = incidentGuidance(row);
+    const linkedId = Number(guide.linkedMemberId || 0);
+    const compare = row.moodle_pending_user_id
+      ? `<div class="incident-compare"><span>Gestión: ${escapeHtml(row.documento || '—')}</span><span>ID Moodle: #${escapeHtml(row.moodle_pending_user_id)}</span></div>`
+      : '';
+    const actions = [
+      `<button class="btn btn-secondary" data-open-member="${Number(row.id)}"><i class="fa-solid fa-address-card"></i> Abrir ficha</button>`,
+      guide.action === 'retry' ? `<button class="btn btn-warning" data-process-pending="${Number(row.id)}"><i class="fa-solid fa-rotate-right"></i> Procesar ahora</button>` : '',
+      guide.action === 'confirm' ? `<button class="btn btn-primary" data-confirm-link="${Number(row.id)}"><i class="fa-solid fa-link"></i> Confirmar vínculo</button>` : '',
+      linkedId ? `<button class="btn btn-secondary" data-open-linked="${linkedId}"><i class="fa-solid fa-code-compare"></i> Abrir ficha #${linkedId}</button>` : ''
+    ].filter(Boolean).join('');
+
+    return `
+      <article class="incident-row">
+        <div>
+          <h4>${escapeHtml(`${row.nombres || ''} ${row.apellidos || ''}`.trim() || `Integrante #${row.id}`)}</h4>
+          <p>${escapeHtml(row.documento || 'Sin documento')} · ${escapeHtml(row.correo || 'Sin correo')} · ${escapeHtml(row.codigo_integrante || '')}</p>
+          <p><b>${escapeHtml(row.moodle_sync_status || 'Sin estado')}</b>${row.moodle_pending_user_id ? ` · Moodle candidato #${escapeHtml(row.moodle_pending_user_id)}` : ''}</p>
+          ${compare}
+          <div class="incident-guide"><strong>¿Qué pasó?</strong><p>${escapeHtml(guide.what)}</p><strong>¿Cómo resolverlo?</strong><p>${escapeHtml(guide.how)}</p></div>
+          ${row.moodle_sync_error ? `<details class="incident-technical"><summary>Ver detalle técnico</summary><code>${escapeHtml(row.moodle_sync_error)}</code></details>` : ''}
+        </div>
+        <div class="incident-actions">${actions}</div>
+      </article>`;
+  }
+
+  function bindUnifiedIncidentActions(container, rows) {
+    container.querySelectorAll('[data-open-member]').forEach((btn) => btn.addEventListener('click', () => {
+      const id = Number(btn.dataset.openMember);
+      closeIncidentDetail();
+      try { if (typeof openMember === 'function') openMember(id); } catch (e) { console.warn(e); }
+    }));
+    container.querySelectorAll('[data-open-linked]').forEach((btn) => btn.addEventListener('click', () => {
+      const id = Number(btn.dataset.openLinked);
+      closeIncidentDetail();
+      try { if (typeof openMember === 'function') openMember(id); } catch (e) { console.warn(e); }
+    }));
+    container.querySelectorAll('[data-process-pending]').forEach((btn) => btn.addEventListener('click', () => processPendingIncident(Number(btn.dataset.processPending), btn)));
+    container.querySelectorAll('[data-confirm-link]').forEach((btn) => btn.addEventListener('click', () => {
+      const row = rows.find((item) => Number(item.id) === Number(btn.dataset.confirmLink));
+      if (row) confirmIncidentMoodleLink(row, btn);
+    }));
+  }
+
+  async function openAllActiveIncidents() {
+    if (typeof sb === 'undefined') return;
+    ensureIncidentUI();
+    q('incidentModalTitle').textContent = 'Incidencias por revisar';
+    q('incidentModalSubtitle').textContent = 'Cargando el mismo conjunto que muestra el contador…';
+    q('incidentModalBody').innerHTML = '<div class="empty"><div class="spinner"></div></div>';
+    q('gestionIncidentModal').classList.add('show');
+    q('gestionIncidentModal').setAttribute('aria-hidden', 'false');
+
+    const statuses = [
+      ['PENDIENTE', 'Pendientes / procesando'],
+      ['PENDIENTE_VERIFICACION', 'Pendientes de verificación'],
+      ['NO_ENCONTRADO', 'No encontrados en Moodle'],
+      ['ERROR', 'Errores Moodle'],
+      ['SIN_ID', 'Creado/existente sin ID']
+    ];
+
+    try {
+      const [moodleGroups, mailResult] = await Promise.all([
+        Promise.all(statuses.map(async ([status, label]) => {
+          const { data, error } = await sb.rpc('admin_gestion_incidencias_detalle', { p_estado: status, p_limit: 500 });
+          if (error) throw error;
+          return { status, label, rows: data || [] };
+        })),
+        sb.rpc('admin_gestion_cola_correos', { p_estado: '', p_limit: 100 })
+      ]);
+
+      if (mailResult.error) throw mailResult.error;
+      const mails = (mailResult.data || []).filter((item) => ['pendiente','procesando','fallido'].includes(String(item.estado || '').toLowerCase()));
+      const moodleRows = moodleGroups.flatMap((group) => group.rows);
+      const total = moodleRows.length + mails.length;
+
+      q('incidentModalSubtitle').textContent = `${nf(total)} incidencia${total === 1 ? '' : 's'} activa${total === 1 ? '' : 's'}`;
+
+      const sections = moodleGroups
+        .filter((group) => group.rows.length)
+        .map((group) => `
+          <section class="incident-all-section">
+            <div class="incident-all-title"><h4>${escapeHtml(group.label)}</h4><span class="incident-all-count">${nf(group.rows.length)}</span></div>
+            ${group.rows.map(renderUnifiedMoodleIncident).join('')}
+          </section>`)
+        .join('');
+
+      const mailSection = mails.length ? `
+        <section class="incident-all-section">
+          <div class="incident-all-title"><h4>Correos pendientes o fallidos</h4><span class="incident-all-count">${nf(mails.length)}</span></div>
+          ${mails.map((item) => `
+            <article class="incident-mail-row">
+              <b>${escapeHtml(item.nombre || 'Integrante')}</b>
+              <p>${escapeHtml(item.correo || 'Sin correo')} · ${escapeHtml(item.estado || 'Sin estado')}</p>
+              ${item.ultimo_error ? `<p class="incident-error">${escapeHtml(item.ultimo_error)}</p>` : ''}
+            </article>`).join('')}
+        </section>` : '';
+
+      q('incidentModalBody').innerHTML = total
+        ? sections + mailSection
+        : '<div class="empty"><i class="fa-solid fa-circle-check"></i><b>No hay incidencias activas.</b><div>El contador y el detalle están al día.</div></div>';
+
+      bindUnifiedIncidentActions(q('incidentModalBody'), moodleRows);
+
+      if (q('statProcesses')) q('statProcesses').textContent = nf(total);
+      q('processesCard')?.setAttribute('aria-label', total ? `Ver ${nf(total)} incidencias activas` : 'No hay incidencias activas');
+    } catch (error) {
+      q('incidentModalBody').innerHTML = `<div class="empty"><i class="fa-solid fa-triangle-exclamation"></i>${escapeHtml(error.message || 'No se pudieron cargar las incidencias.')}</div>`;
+    }
+  }
+
+  function bindProcessesCard() {
+    const card = q('processesCard');
+    if (!card || card.dataset.unifiedIncidents === '1') return;
+    card.dataset.unifiedIncidents = '1';
+    card.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      openAllActiveIncidents();
+    }, true);
   }
 
   async function reconcileHistoricalMoodle() {
@@ -479,6 +623,7 @@
     installMemberRowObserver();
     patchSummaryFunction();
     bindRefresh();
+    bindProcessesCard();
     setTimeout(refreshIncidents, 700);
     setTimeout(refreshIncidents, 2500);
   }
