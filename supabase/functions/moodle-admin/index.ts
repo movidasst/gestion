@@ -889,7 +889,7 @@ async function getAvailableMoodleFunctions(): Promise<Set<string>> {
   return new Set(asObjects(siteInfo.functions).map((item) => String(item.name || "")));
 }
 
-async function getMoodleUsersByField(field: "id" | "idnumber" | "email", values: Array<string | number>): Promise<JsonObject[]> {
+async function getMoodleUsersByField(field: "id" | "idnumber" | "email" | "username", values: Array<string | number>): Promise<JsonObject[]> {
   const unique = [...new Set(values.map((value) => String(value).trim()).filter(Boolean))];
   if (!unique.length) return [];
   const responses: unknown[] = [];
@@ -901,6 +901,308 @@ async function getMoodleUsersByField(field: "id" | "idnumber" | "email", values:
     responses.push(await callMoodle("core_user_get_users_by_field", parameters));
   }
   return responses.flatMap(asObjects);
+}
+
+
+function reconciliationDocument(value: unknown): string {
+  return cleanText(value, 80)
+    .replace(/[^A-Za-z0-9]/g, "")
+    .toLocaleUpperCase("es");
+}
+
+function uniqueMoodleUsers(users: JsonObject[]): JsonObject[] {
+  const byId = new Map<number, JsonObject>();
+  for (const user of users) {
+    const id = Number(user.id || 0);
+    if (Number.isInteger(id) && id > 0) byId.set(id, user);
+  }
+  return [...byId.values()];
+}
+
+async function reconcileHistoricalMoodleBatch(
+  admin: SupabaseAdminClient,
+  adminUserId: string,
+  requestedLimit: unknown,
+): Promise<JsonObject> {
+  const batchSize = Math.min(50, Math.max(1, Number(requestedLimit || 25) || 25));
+  const { data: members, error: membersError } = await admin
+    .from("integrantes")
+    .select("id,nombres,apellidos,documento,correo,moodle_sync_status,moodle_sync_attempts")
+    .eq("moodle_sync_status", "NO_SOLICITADO")
+    .is("moodle_user_id", null)
+    .order("id", { ascending: true })
+    .limit(batchSize);
+
+  if (membersError) {
+    throw new Error(`No se pudieron leer los históricos pendientes: ${membersError.message}`);
+  }
+
+  if (!members?.length) {
+    return {
+      processed: 0,
+      linked: 0,
+      verification: 0,
+      not_found: 0,
+      conflicts: 0,
+      remaining: 0,
+    };
+  }
+
+  const prepared = members.map((member) => ({
+    ...member,
+    document_key: reconciliationDocument(member.documento),
+    email_key: normalizeEmail(member.correo),
+  }));
+
+  const documents = prepared.map((member) => member.document_key).filter(Boolean);
+  const emails = prepared.map((member) => member.email_key).filter(Boolean);
+
+  const [byUsername, byIdNumber, byEmail] = await Promise.all([
+    getMoodleUsersByField("username", documents.map((value) => value.toLocaleLowerCase("es"))),
+    getMoodleUsersByField("idnumber", documents),
+    getMoodleUsersByField("email", emails),
+  ]);
+
+  const usernameIndex = new Map<string, JsonObject[]>();
+  const idNumberIndex = new Map<string, JsonObject[]>();
+  const emailIndex = new Map<string, JsonObject[]>();
+
+  const addIndex = (index: Map<string, JsonObject[]>, key: string, user: JsonObject) => {
+    if (!key) return;
+    const list = index.get(key) || [];
+    list.push(user);
+    index.set(key, list);
+  };
+
+  byUsername.forEach((user) => addIndex(usernameIndex, reconciliationDocument(user.username), user));
+  byIdNumber.forEach((user) => addIndex(idNumberIndex, reconciliationDocument(user.idnumber), user));
+  byEmail.forEach((user) => addIndex(emailIndex, normalizeEmail(user.email), user));
+
+  const resolutions = prepared.map((member) => {
+    const direct = uniqueMoodleUsers([
+      ...(usernameIndex.get(member.document_key) || []),
+      ...(idNumberIndex.get(member.document_key) || []),
+    ]);
+    const emailUsers = uniqueMoodleUsers(emailIndex.get(member.email_key) || []);
+
+    if (direct.length === 1) {
+      return { member, decision: "candidate", candidate: direct[0], reason: "Coincidencia exacta por documento/usuario." };
+    }
+
+    if (direct.length > 1) {
+      return {
+        member,
+        decision: "verification",
+        candidate: null,
+        reason: "Moodle devolvió más de una cuenta compatible con el documento; requiere revisión manual.",
+      };
+    }
+
+    const strongEmailMatches = uniqueMoodleUsers(emailUsers.filter((user) => {
+      const idNumber = reconciliationDocument(user.idnumber);
+      const username = reconciliationDocument(user.username);
+      return Boolean(member.document_key) && (idNumber === member.document_key || username === member.document_key);
+    }));
+
+    if (strongEmailMatches.length === 1) {
+      return {
+        member,
+        decision: "candidate",
+        candidate: strongEmailMatches[0],
+        reason: "Coincidencia por correo confirmada además por documento.",
+      };
+    }
+
+    if (emailUsers.length > 0) {
+      return {
+        member,
+        decision: "verification",
+        candidate: emailUsers.length === 1 ? emailUsers[0] : null,
+        reason: "El correo existe en Moodle, pero no hay una coincidencia inequívoca de documento.",
+      };
+    }
+
+    return {
+      member,
+      decision: "not_found",
+      candidate: null,
+      reason: "No se encontró una cuenta Moodle por usuario/documento ni por correo.",
+    };
+  });
+
+  const candidateIds = [...new Set(
+    resolutions
+      .map((item) => Number(item.candidate?.id || 0))
+      .filter((id) => Number.isInteger(id) && id > 0),
+  )];
+
+  const linkedByMoodleId = new Map<number, JsonObject>();
+  if (candidateIds.length) {
+    const { data: linkedRows, error: linkedError } = await admin
+      .from("integrantes")
+      .select("id,nombres,apellidos,documento,correo,moodle_user_id")
+      .in("moodle_user_id", candidateIds);
+    if (linkedError) {
+      throw new Error(`No se pudo validar la unicidad de los vínculos Moodle: ${linkedError.message}`);
+    }
+    (linkedRows || []).forEach((row) => {
+      const moodleId = Number(row.moodle_user_id || 0);
+      if (moodleId > 0) linkedByMoodleId.set(moodleId, row);
+    });
+  }
+
+  const now = new Date().toISOString();
+  let linked = 0;
+  let verification = 0;
+  let notFound = 0;
+  let conflicts = 0;
+
+  await Promise.all(resolutions.map(async (resolution) => {
+    const member = resolution.member;
+    const attempts = Number(member.moodle_sync_attempts || 0) + 1;
+    const candidateId = Number(resolution.candidate?.id || 0);
+    const existingLink = candidateId > 0 ? linkedByMoodleId.get(candidateId) : null;
+
+    if (resolution.decision === "candidate" && candidateId > 0 && !existingLink) {
+      const { error } = await admin
+        .from("integrantes")
+        .update({
+          moodle_user_id: candidateId,
+          moodle_sync_status: "EXISTENTE",
+          moodle_sync_error: null,
+          moodle_sync_attempts: attempts,
+          moodle_last_attempt_at: now,
+          moodle_synced_at: now,
+          moodle_pending_user_id: null,
+          moodle_pending_username: null,
+          moodle_pending_email: null,
+          moodle_pending_at: null,
+          moodle_pending_reason: null,
+        })
+        .eq("id", member.id)
+        .eq("moodle_sync_status", "NO_SOLICITADO")
+        .is("moodle_user_id", null);
+      if (error) {
+        if (error.code !== "23505") {
+          throw new Error(`No se pudo vincular al integrante #${member.id}: ${error.message}`);
+        }
+        const pendingSave = await admin
+          .from("integrantes")
+          .update({
+            moodle_sync_status: "PENDIENTE_VERIFICACION",
+            moodle_sync_error: null,
+            moodle_sync_attempts: attempts,
+            moodle_last_attempt_at: now,
+            moodle_pending_user_id: candidateId,
+            moodle_pending_username: cleanText(resolution.candidate?.username, 100) || null,
+            moodle_pending_email: normalizeEmail(resolution.candidate?.email) || null,
+            moodle_pending_at: now,
+            moodle_pending_reason: "La cuenta Moodle encontrada quedó vinculada a otra ficha durante la conciliación; requiere revisión manual.",
+          })
+          .eq("id", member.id);
+        if (pendingSave.error) throw new Error(pendingSave.error.message);
+        verification += 1;
+        conflicts += 1;
+        return;
+      }
+      linked += 1;
+      return;
+    }
+
+    if (resolution.decision === "candidate" && candidateId > 0 && existingLink) {
+      const { error } = await admin
+        .from("integrantes")
+        .update({
+          moodle_sync_status: "PENDIENTE_VERIFICACION",
+          moodle_sync_error: null,
+          moodle_sync_attempts: attempts,
+          moodle_last_attempt_at: now,
+          moodle_pending_user_id: candidateId,
+          moodle_pending_username: cleanText(resolution.candidate?.username, 100) || null,
+          moodle_pending_email: normalizeEmail(resolution.candidate?.email) || null,
+          moodle_pending_at: now,
+          moodle_pending_reason: `La cuenta Moodle #${candidateId} ya está vinculada al integrante #${existingLink.id}; requiere verificar cuál ficha corresponde.`,
+        })
+        .eq("id", member.id);
+      if (error) throw new Error(error.message);
+      verification += 1;
+      conflicts += 1;
+      return;
+    }
+
+    if (resolution.decision === "verification") {
+      const pendingId = candidateId > 0 ? candidateId : null;
+      const { error } = await admin
+        .from("integrantes")
+        .update({
+          moodle_sync_status: "PENDIENTE_VERIFICACION",
+          moodle_sync_error: null,
+          moodle_sync_attempts: attempts,
+          moodle_last_attempt_at: now,
+          moodle_pending_user_id: pendingId,
+          moodle_pending_username: cleanText(resolution.candidate?.username, 100) || null,
+          moodle_pending_email: normalizeEmail(resolution.candidate?.email) || member.email_key || null,
+          moodle_pending_at: now,
+          moodle_pending_reason: resolution.reason,
+        })
+        .eq("id", member.id);
+      if (error) throw new Error(error.message);
+      verification += 1;
+      return;
+    }
+
+    const { error } = await admin
+      .from("integrantes")
+      .update({
+        moodle_sync_status: "NO_ENCONTRADO",
+        moodle_sync_error: null,
+        moodle_sync_attempts: attempts,
+        moodle_last_attempt_at: now,
+        moodle_synced_at: null,
+        moodle_pending_user_id: null,
+        moodle_pending_username: null,
+        moodle_pending_email: member.email_key || null,
+        moodle_pending_at: now,
+        moodle_pending_reason: resolution.reason,
+      })
+      .eq("id", member.id);
+    if (error) throw new Error(error.message);
+    notFound += 1;
+  }));
+
+  const { count: remaining, error: remainingError } = await admin
+    .from("integrantes")
+    .select("id", { count: "exact", head: true })
+    .eq("moodle_sync_status", "NO_SOLICITADO")
+    .is("moodle_user_id", null);
+  if (remainingError) throw new Error(remainingError.message);
+
+  const summary = {
+    processed: members.length,
+    linked,
+    verification,
+    not_found: notFound,
+    conflicts,
+    remaining: remaining || 0,
+  };
+
+  const { error: auditError } = await admin.from("moodle_admin_auditoria").insert({
+    admin_user_id: adminUserId,
+    accion: "CREAR_VINCULAR_USUARIO",
+    integrante_id: null,
+    moodle_user_id: null,
+    moodle_course_id: null,
+    detalle: {
+      origen: "reconciliacion_historica",
+      modo: "solo_lectura_moodle",
+      ...summary,
+    },
+    resultado: "OK",
+    error: null,
+  });
+  if (auditError) console.error("No se pudo auditar la conciliación histórica:", auditError.message);
+
+  return summary;
 }
 
 async function getCompanyCourseContext(admin: SupabaseAdminClient, companyCourseId: string) {
@@ -2204,6 +2506,11 @@ Deno.serve(async (req: Request) => {
     if (action === "courses") {
       const courses = await getCourses();
       return json(req, { ok: true, courses, total: courses.length });
+    }
+
+    if (action === "reconcile_historical_moodle") {
+      const summary = await reconcileHistoricalMoodleBatch(admin, adminUserId, body.limit);
+      return json(req, { ok: true, summary });
     }
 
     if (action === "sync_incidents") {
