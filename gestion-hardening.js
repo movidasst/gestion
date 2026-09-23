@@ -14,7 +14,7 @@
       .incident-panel{margin:0 0 18px;background:#fff;border:1px solid #dce7eb;border-radius:20px;box-shadow:0 8px 28px rgba(0,32,91,.06);overflow:hidden}
       .incident-head{padding:14px 16px;border-bottom:1px solid #dce7eb;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
       .incident-head h3{margin:0;color:#00205b;font-size:1rem}.incident-head small{color:#647b8d;margin-left:auto}
-      .incident-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:9px;padding:13px}
+      .incident-grid{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:9px;padding:13px}
       .incident-card{border:1px solid #dce7eb;background:#f9fbfc;border-radius:15px;padding:12px;text-align:left;color:#17324a}
       .incident-card:hover{border-color:#007b85;background:#f1fbfa}.incident-card b{display:block;font-size:1.25rem;color:#00205b}.incident-card span{display:block;margin-top:4px;font-size:.69rem;font-weight:800;color:#647b8d}
       .incident-card.danger{border-color:#ffd3da;background:#fff7f8}.incident-card.warn{border-color:#ffe4a8;background:#fffbef}
@@ -41,11 +41,12 @@
     panel.id = 'gestionIncidentPanel';
     panel.className = 'incident-panel';
     panel.innerHTML = `
-      <div class="incident-head"><h3><i class="fa-solid fa-triangle-exclamation" style="color:#ffb600;margin-right:7px"></i>Centro de incidencias</h3><small id="incidentUpdated">Actualizando…</small></div>
+      <div class="incident-head"><h3><i class="fa-solid fa-triangle-exclamation" style="color:#ffb600;margin-right:7px"></i>Centro de incidencias y conciliación Moodle</h3><small id="incidentUpdated">Actualizando…</small><button id="reconcileHistoricalBtn" class="btn btn-primary" type="button"><i class="fa-solid fa-link"></i> Reconciliar históricos</button></div>
       <div class="incident-grid">
-        <button class="incident-card" data-incident="NO_SOLICITADO"><b id="incNoSolicitado">—</b><span>Sin Moodle · histórico</span></button>
+        <button class="incident-card" data-incident="NO_SOLICITADO"><b id="incNoSolicitado">—</b><span>Históricos por reconciliar</span></button>
         <button class="incident-card warn" data-incident="PENDIENTE"><b id="incPendiente">—</b><span>Pendientes / procesando</span></button>
         <button class="incident-card warn" data-incident="PENDIENTE_VERIFICACION"><b id="incVerificacion">—</b><span>Pendientes de verificación</span></button>
+        <button class="incident-card warn" data-incident="NO_ENCONTRADO"><b id="incNoEncontrado">—</b><span>No encontrados en Moodle</span></button>
         <button class="incident-card danger" data-incident="ERROR"><b id="incError">—</b><span>Errores Moodle</span></button>
         <button class="incident-card danger" data-incident="SIN_ID"><b id="incSinId">—</b><span>Creado/existente sin ID</span></button>
       </div>`;
@@ -60,6 +61,7 @@
     modal.innerHTML = `<div class="incident-modal-head"><div><h3 id="incidentModalTitle">Incidencias</h3><div class="person-sub" id="incidentModalSubtitle">—</div></div><button id="incidentModalClose" class="btn btn-secondary"><i class="fa-solid fa-xmark"></i> Cerrar</button></div><div id="incidentModalBody" class="incident-modal-body"></div>`;
     document.body.appendChild(modal);
     q('incidentModalClose').addEventListener('click', closeIncidentDetail);
+    q('reconcileHistoricalBtn').addEventListener('click', reconcileHistoricalMoodle);
   }
 
   async function refreshIncidents() {
@@ -72,10 +74,16 @@
       q('incNoSolicitado').textContent = nf(data.moodle_no_solicitado);
       q('incPendiente').textContent = nf(data.moodle_pendiente);
       q('incVerificacion').textContent = nf(data.moodle_verificacion);
+      q('incNoEncontrado').textContent = nf(data.moodle_no_encontrado);
       q('incError').textContent = nf(data.moodle_error);
       q('incSinId').textContent = nf(data.moodle_sin_id);
-      const unresolved = Number(data.moodle_no_solicitado || 0) + Number(data.moodle_pendiente || 0) + Number(data.moodle_verificacion || 0) + Number(data.moodle_error || 0) + Number(data.moodle_sin_id || 0) + Number(data.correos_pendientes || 0) + Number(data.correos_fallidos || 0);
+      const historical = Number(data.moodle_no_solicitado || 0);
+      const unresolved = Number(data.moodle_no_encontrado || 0) + Number(data.moodle_pendiente || 0) + Number(data.moodle_verificacion || 0) + Number(data.moodle_error || 0) + Number(data.moodle_sin_id || 0) + Number(data.correos_pendientes || 0) + Number(data.correos_fallidos || 0);
       if (q('statProcesses')) q('statProcesses').textContent = nf(unresolved);
+      if (q('reconcileHistoricalBtn')) {
+        q('reconcileHistoricalBtn').disabled = historical === 0;
+        q('reconcileHistoricalBtn').title = historical ? `${nf(historical)} históricos pendientes de comparar con Moodle` : 'No hay históricos pendientes de reconciliar';
+      }
       if (q('incidentUpdated')) q('incidentUpdated').textContent = `Moodle + correos · ${new Date(data.actualizado_at || Date.now()).toLocaleTimeString('es', {hour:'2-digit', minute:'2-digit'})}`;
     } catch (error) {
       console.warn('No se pudo actualizar Centro de incidencias', error);
@@ -85,7 +93,7 @@
 
   async function openIncidentDetail(status) {
     if (typeof sb === 'undefined') return;
-    const labels = {NO_SOLICITADO:'Sin Moodle · histórico',PENDIENTE:'Pendientes / procesando',PENDIENTE_VERIFICACION:'Pendientes de verificación',ERROR:'Errores Moodle',SIN_ID:'Creado/existente sin ID'};
+    const labels = {NO_SOLICITADO:'Históricos por reconciliar',PENDIENTE:'Pendientes / procesando',PENDIENTE_VERIFICACION:'Pendientes de verificación',NO_ENCONTRADO:'No encontrados en Moodle',ERROR:'Errores Moodle',SIN_ID:'Creado/existente sin ID'};
     q('incidentModalTitle').textContent = labels[status] || 'Incidencias Moodle';
     q('incidentModalSubtitle').textContent = 'Máximo 500 registros por consulta';
     q('incidentModalBody').innerHTML = '<div class="empty"><div class="spinner"></div></div>';
@@ -112,6 +120,75 @@
       }));
     } catch (error) {
       q('incidentModalBody').innerHTML = `<div class="empty"><i class="fa-solid fa-triangle-exclamation"></i>${escapeHtml(error.message || 'No se pudo consultar la incidencia.')}</div>`;
+    }
+  }
+
+  async function reconcileHistoricalMoodle() {
+    if (typeof academyApi !== 'function') {
+      if (typeof toast === 'function') toast('No está disponible la conexión administrativa con Moodle.', true);
+      return;
+    }
+    const initial = Number(incidentState?.moodle_no_solicitado || 0);
+    if (!initial) {
+      if (typeof toast === 'function') toast('No hay históricos pendientes de reconciliar.');
+      return;
+    }
+    if (!confirm(`Se compararán ${nf(initial)} registros históricos con Moodle. La operación NO creará usuarios, NO cambiará contraseñas y NO modificará cuentas Moodle. Solo guardará en Supabase vínculos inequívocos. ¿Continuar?`)) return;
+
+    const button = q('reconcileHistoricalBtn');
+    const original = button?.innerHTML || '';
+    let processed = 0;
+    let linked = 0;
+    let verification = 0;
+    let notFound = 0;
+    let conflicts = 0;
+    let remaining = initial;
+    let batches = 0;
+
+    if (button) button.disabled = true;
+
+    try {
+      while (remaining > 0 && batches < 100) {
+        batches += 1;
+        if (button) button.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Reconciliando · ${nf(processed)} procesados`;
+
+        const result = await academyApi('reconcile_historical_moodle', { limit: 50 });
+        const summary = result?.summary || {};
+        const batchProcessed = Number(summary.processed || 0);
+
+        processed += batchProcessed;
+        linked += Number(summary.linked || 0);
+        verification += Number(summary.verification || 0);
+        notFound += Number(summary.not_found || 0);
+        conflicts += Number(summary.conflicts || 0);
+        remaining = Number(summary.remaining || 0);
+
+        await refreshIncidents();
+        if (batchProcessed === 0) break;
+      }
+
+      try { if (typeof loadMembers === 'function') await loadMembers(); } catch (e) { console.warn(e); }
+
+      const message = `Reconciliación terminada: ${nf(linked)} vinculados, ${nf(verification)} para verificar y ${nf(notFound)} no encontrados. Moodle no fue modificado.`;
+      if (typeof toast === 'function') toast(message);
+      else alert(message);
+
+      if (remaining > 0) {
+        console.warn(`La conciliación se detuvo con ${remaining} históricos aún pendientes.`);
+      }
+      if (conflicts > 0) {
+        console.info(`${conflicts} coincidencia(s) ya estaban vinculadas a otra ficha y quedaron para verificación manual.`);
+      }
+    } catch (error) {
+      console.error('No se pudo completar la reconciliación histórica', error);
+      if (typeof toast === 'function') toast(error.message || 'No se pudo completar la reconciliación histórica.', true);
+      else alert(error.message || 'No se pudo completar la reconciliación histórica.');
+    } finally {
+      if (button) {
+        button.innerHTML = original;
+        button.disabled = false;
+      }
+      await refreshIncidents();
     }
   }
 
