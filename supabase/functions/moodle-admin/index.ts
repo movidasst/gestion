@@ -2565,6 +2565,99 @@ Deno.serve(async (req: Request) => {
       return json(req, { ok: true, incidents });
     }
 
+    if (action === "confirm_moodle_link") {
+      const integranteId = positiveInteger(body.integrante_id, "El integrante");
+      const candidateId = positiveInteger(body.moodle_user_id, "El usuario Moodle");
+
+      const { data: member, error: memberError } = await admin
+        .from("integrantes")
+        .select("id,nombres,apellidos,documento,correo,moodle_user_id,moodle_sync_status,moodle_pending_user_id,moodle_pending_email,moodle_pending_username")
+        .eq("id", integranteId)
+        .maybeSingle();
+      if (memberError) throw new Error(`No se pudo consultar el integrante: ${memberError.message}`);
+      if (!member) throw new Error("El integrante no existe.");
+      if (Number(member.moodle_user_id || 0) > 0) {
+        return json(req, { ok: true, already_linked: true, member });
+      }
+      if (String(member.moodle_sync_status || "") !== "PENDIENTE_VERIFICACION") {
+        throw new Error("Este integrante ya no está pendiente de verificación.");
+      }
+      if (Number(member.moodle_pending_user_id || 0) !== candidateId) {
+        throw new Error("El usuario Moodle seleccionado ya no coincide con el candidato pendiente.");
+      }
+
+      const { data: conflict, error: conflictError } = await admin
+        .from("integrantes")
+        .select("id,nombres,apellidos,documento,correo,moodle_user_id")
+        .eq("moodle_user_id", candidateId)
+        .neq("id", integranteId)
+        .maybeSingle();
+      if (conflictError) throw new Error(`No se pudo verificar si el usuario Moodle ya está vinculado: ${conflictError.message}`);
+      if (conflict) {
+        throw new Error(`La cuenta Moodle #${candidateId} ya está vinculada al integrante #${conflict.id}. Debes revisar ambas fichas antes de mover el vínculo.`);
+      }
+
+      const moodleUsers = await getMoodleUsersByField("id", [candidateId]);
+      const candidate = moodleUsers.find((user) => Number(user.id || 0) === candidateId);
+      if (!candidate) throw new Error("La cuenta candidata ya no existe en Moodle.");
+
+      const memberEmail = normalizeEmail(member.correo);
+      const moodleEmail = normalizeEmail(candidate.email);
+      if (!memberEmail || !moodleEmail || memberEmail !== moodleEmail) {
+        throw new Error("El correo de la cuenta Moodle ya no coincide con el correo del integrante. No se vinculó.");
+      }
+
+      const now = new Date().toISOString();
+      const { data: updated, error: updateError } = await admin
+        .from("integrantes")
+        .update({
+          moodle_user_id: candidateId,
+          moodle_sync_status: "EXISTENTE",
+          moodle_sync_error: null,
+          moodle_last_attempt_at: now,
+          moodle_synced_at: now,
+          moodle_pending_user_id: null,
+          moodle_pending_username: null,
+          moodle_pending_email: null,
+          moodle_pending_at: null,
+          moodle_pending_reason: null,
+        })
+        .eq("id", integranteId)
+        .eq("moodle_sync_status", "PENDIENTE_VERIFICACION")
+        .is("moodle_user_id", null)
+        .select("id,nombres,apellidos,documento,correo,moodle_user_id,moodle_sync_status")
+        .maybeSingle();
+
+      if (updateError) throw new Error(`No se pudo guardar el vínculo Moodle: ${updateError.message}`);
+      if (!updated) throw new Error("La ficha cambió mientras se confirmaba el vínculo. Actualiza y revisa de nuevo.");
+
+      await audit(admin, {
+        admin_user_id: adminUserId,
+        accion: "CREAR_VINCULAR_USUARIO",
+        integrante_id: integranteId,
+        moodle_user_id: candidateId,
+        detalle: {
+          origen: "confirmacion_manual_incidencia",
+          documento_gestion: member.documento || null,
+          username_moodle: candidate.username || null,
+          correo_confirmado: moodleEmail,
+          modifica_moodle: false,
+        },
+        resultado: "OK",
+      });
+
+      return json(req, {
+        ok: true,
+        linked: true,
+        member: updated,
+        moodle: {
+          id: candidateId,
+          username: candidate.username || null,
+          email: moodleEmail,
+        },
+      });
+    }
+
     if (action === "retry_moodle_sync") {
       const integranteId = positiveInteger(body.integrante_id, "El integrante");
       const { data: member, error: memberError } = await admin
