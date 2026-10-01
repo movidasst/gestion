@@ -57,7 +57,7 @@ function buildHtml(job: Record<string, unknown>) {
   <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:680px;background:#fff;border-radius:20px;overflow:hidden;box-shadow:0 12px 36px rgba(0,32,91,.12)">
   <tr><td style="height:5px;background:linear-gradient(90deg,#ffcc00 0 33%,#164e9a 33% 66%,#cf2841 66%)"></td></tr>
   <tr><td style="padding:24px;text-align:center;border-bottom:1px solid #e5eef1">
-    <img src="https://raw.githubusercontent.com/movidasst/gestion/main/assets/logo-movida-sst-plus.png" width="110" alt="La Movida SST Plus" style="display:block;margin:auto;max-width:110px">
+    <img src="https://raw.githubusercontent.com/movidasst/gestion/main/assets/logo-movida-sst-plus.png?v=20261001-2" width="110" alt="La Movida SST Plus" style="display:block;margin:auto;max-width:110px">
     <div style="font-size:22px;font-weight:900;color:#00205b;margin-top:8px">La Movida SST Plus</div>
     <div style="font-size:12px;font-weight:800;color:#007b85;text-transform:uppercase;letter-spacing:.08em">De la Reacción a la Prevención</div>
   </td></tr>
