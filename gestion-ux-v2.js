@@ -3,21 +3,6 @@
   const q = (id) => document.getElementById(id);
   let deleteModalMember = null;
 
-  function updateEvaluationCopy() {
-    const module = q('evaluationsModule');
-    if (!module) return;
-    const heroP = module.querySelector('.hero p');
-    if (heroP) heroP.textContent = 'Revisa y califica desde un solo lugar las entregas de las actividades Assignment de Moodle, sin depender del nombre que tenga cada tarea.';
-    const panelHead = module.querySelector('.panel .panel-head h3');
-    if (panelHead && /Tareas de todos los cursos/i.test(panelHead.textContent || '')) panelHead.innerHTML = '<i class="fa-solid fa-file-circle-check" style="color:var(--teal);margin-right:7px"></i>Actividades evaluables de todos los cursos';
-    const note = module.querySelector('.evaluation-note');
-    if (note) note.textContent = 'Detección por tipo real de actividad Moodle (Assignment). Se excluyen automáticamente las actividades identificadas como comprobantes de pago.';
-    const stats = module.querySelectorAll('.stat small');
-    stats.forEach(el => { if (/Tareas detectadas/i.test(el.textContent || '')) el.textContent = 'Assignments detectadas'; });
-    const search = q('evaluationSearch');
-    if (search) search.placeholder = 'Estudiante, curso o actividad';
-  }
-
   function improveAccessibility() {
     const toast = q('toast');
     if (toast) { toast.setAttribute('role', 'status'); toast.setAttribute('aria-live', 'polite'); toast.setAttribute('aria-atomic', 'true'); }
@@ -227,7 +212,6 @@
   }
 
   function init() {
-    updateEvaluationCopy();
     improveAccessibility();
     addIncidentHints();
     improveExternalLinks();
