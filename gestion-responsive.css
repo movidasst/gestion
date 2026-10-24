@@ -1,0 +1,123 @@
+/* Gestión SST · capa visual responsive. No modifica operaciones ni datos. */
+#appView.gestion-ui-ready{--gestion-dock-h:70px}
+#appView.gestion-ui-ready .module-nav{
+  width:100%;max-width:100%;padding:7px;gap:5px;
+  background:#e9f2f5;border:1px solid #d7e6eb;
+  box-shadow:0 5px 20px rgba(0,32,91,.035);
+  scrollbar-width:thin;scrollbar-color:#a0bdc4 transparent
+}
+#appView.gestion-ui-ready .module-tab{display:inline-flex;align-items:center;justify-content:center;gap:8px;transition:background .18s,color .18s,box-shadow .18s}
+#appView.gestion-ui-ready .module-tab:hover{background:#f8fcfd;color:var(--navy)}
+#appView.gestion-ui-ready .module-tab.active{background:#fff;color:var(--navy);box-shadow:0 5px 13px rgba(0,32,91,.11)}
+#appView.gestion-ui-ready .module-tab:focus-visible,
+#appView.gestion-ui-ready .academy-view-tab:focus-visible,
+#appView.gestion-ui-ready .gestion-dock-btn:focus-visible,
+#appView.gestion-ui-ready .gestion-more-item:focus-visible{
+  outline:3px solid #ffb600;outline-offset:2px
+}
+#appView.gestion-ui-ready .panel{border-color:#dce8ed;box-shadow:0 8px 28px rgba(0,32,91,.055)}
+#appView.gestion-ui-ready .table-wrap{max-width:100%;overscroll-behavior-x:contain;-webkit-overflow-scrolling:touch}
+#appView.gestion-ui-ready .data-table th{white-space:nowrap}
+#appView.gestion-ui-ready .panel-head h3{line-height:1.3}
+#appView.gestion-ui-ready .hero h2{line-height:1.14}
+#appView.gestion-ui-ready .academy-subnav{scrollbar-width:thin;max-width:100%}
+/* La navegación compacta es exclusivamente para pantallas pequeñas. */
+#appView .gestion-mobile-nav{display:none}
+@media(max-width:780px){
+ #appView.gestion-ui-ready .layout{
+   max-width:100%;min-width:0;
+   padding:15px 12px calc(108px + env(safe-area-inset-bottom,0px))
+ }
+ #appView.gestion-ui-ready .module-nav{display:none}
+ #appView.gestion-ui-ready .topbar-inner{gap:8px;min-height:62px}
+ #appView.gestion-ui-ready .topbar .brand{min-width:0;gap:8px;flex:1}
+ #appView.gestion-ui-ready .topbar .brand img{width:42px;height:42px;flex:none}
+ #appView.gestion-ui-ready .topbar .brand>div{min-width:0}
+ #appView.gestion-ui-ready .topbar .brand h1{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.91rem}
+ #appView.gestion-ui-ready .topbar-actions{gap:5px;flex:none}
+ #appView.gestion-ui-ready .topbar-actions .user-chip{display:none}
+ #appView.gestion-ui-ready .topbar-actions .icon-btn{width:38px;height:38px;min-width:38px;border-radius:11px}
+ #appView.gestion-ui-ready .hero{flex-direction:column;align-items:stretch;gap:10px}
+ #appView.gestion-ui-ready .hero h2{font-size:clamp(1.45rem,5vw,2.1rem)}
+ #appView.gestion-ui-ready .hero .btn{align-self:flex-start}
+ #appView.gestion-ui-ready .stats{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+ #appView.gestion-ui-ready .stat{min-width:0;min-height:112px;padding:14px;border-radius:18px;flex-wrap:wrap;gap:9px}
+ #appView.gestion-ui-ready .stat-icon{width:40px;height:40px;flex:none}
+ #appView.gestion-ui-ready .stat>div:last-child{min-width:0}
+ #appView.gestion-ui-ready .stat b{font-size:1.4rem}
+ #appView.gestion-ui-ready .stat small{font-size:.7rem;overflow-wrap:anywhere}
+ #appView.gestion-ui-ready .panel{border-radius:18px}
+ #appView.gestion-ui-ready .panel-head{align-items:flex-start;gap:10px}
+ #appView.gestion-ui-ready .panel-actions{margin-left:0;flex-wrap:wrap;max-width:100%}
+ #appView.gestion-ui-ready .comm-grid,#appView.gestion-ui-ready .academy-grid,
+ #appView.gestion-ui-ready .consult-grid,#appView.gestion-ui-ready .template-layout,
+ #appView.gestion-ui-ready .evidence-body{grid-template-columns:minmax(0,1fr)}
+ #appView.gestion-ui-ready .filters,#appView.gestion-ui-ready .payment-filters,
+ #appView.gestion-ui-ready .evaluation-filters,#appView.gestion-ui-ready .feedback-filters,
+ #appView.gestion-ui-ready .academic-filters,#appView.gestion-ui-ready .academic-student-filters{
+   grid-template-columns:minmax(0,1fr);gap:9px
+ }
+ #appView.gestion-ui-ready .filters .search-wrap,
+ #appView.gestion-ui-ready .payment-filters .search-wrap,
+ #appView.gestion-ui-ready .evaluation-filters .search-wrap,
+ #appView.gestion-ui-ready .feedback-filters .search-wrap{grid-column:1/-1}
+ #appView.gestion-ui-ready .academy-subnav{width:100%;max-width:100%;overflow-x:auto}
+ #appView.gestion-ui-ready .academy-view-tab{flex:none}
+ #appView.gestion-ui-ready .gestion-mobile-nav{
+   display:grid;position:fixed;left:0;right:0;bottom:0;z-index:85;
+   grid-template-columns:repeat(5,minmax(0,1fr));gap:0;
+   min-height:var(--gestion-dock-h);padding:5px max(5px,env(safe-area-inset-left,0px))
+     calc(5px + env(safe-area-inset-bottom,0px)) max(5px,env(safe-area-inset-right,0px));
+   background:#fff;border-top:1px solid #dce8ec;
+   box-shadow:0 -6px 26px rgba(0,32,91,.1);
+   isolation:isolate
+ }
+ #appView.gestion-ui-ready .gestion-dock-btn{
+   position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;
+   gap:3px;min-width:0;min-height:57px;border:0;border-radius:12px;
+   background:transparent;color:#627888;font:800 .63rem/1.12 Outfit,system-ui,sans-serif;
+   padding:5px 2px;cursor:pointer;-webkit-tap-highlight-color:transparent
+ }
+ #appView.gestion-ui-ready .gestion-dock-btn i{font-size:1.12rem;line-height:1.2}
+ #appView.gestion-ui-ready .gestion-dock-btn span.gestion-nav-label{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+ #appView.gestion-ui-ready .gestion-dock-btn.active{background:#e8f6f5;color:#006f7b}
+ #appView.gestion-ui-ready .gestion-dock-btn.active:before{
+   content:"";position:absolute;top:2px;left:calc(50% - 13px);width:26px;height:3px;
+   border-radius:8px;background:#007b85
+ }
+ #appView.gestion-ui-ready .gestion-nav-badge{
+   position:absolute;top:1px;left:calc(50% + 10px);min-width:16px;height:16px;
+   border-radius:12px;background:#b82640;color:white;padding:0 4px;
+   font:800 10px/16px Outfit,system-ui,sans-serif;text-align:center
+ }
+ #appView.gestion-ui-ready .gestion-more-menu{
+   position:absolute;bottom:calc(100% + 9px);right:12px;
+   width:min(370px,calc(100vw - 24px));max-height:min(390px,calc(100dvh - 150px));
+   overflow:auto;padding:9px;background:#fff;border:1px solid #d8e7eb;
+   border-radius:20px;box-shadow:0 16px 50px rgba(0,32,91,.22)
+ }
+ #appView.gestion-ui-ready .gestion-more-title{margin:5px 9px 10px;font-size:.75rem;font-weight:900;color:var(--navy)}
+ #appView.gestion-ui-ready .gestion-more-item{
+   display:flex;align-items:center;gap:12px;position:relative;width:100%;min-height:48px;
+   background:transparent;border:0;border-radius:12px;text-align:left;padding:10px 12px;
+   color:#294b61;font:800 .84rem Outfit,system-ui,sans-serif;cursor:pointer
+ }
+ #appView.gestion-ui-ready .gestion-more-item i{width:21px;color:#007b85;text-align:center}
+ #appView.gestion-ui-ready .gestion-more-item.active{background:#e8f6f5;color:#006f7b}
+ #appView.gestion-ui-ready .gestion-more-item .gestion-more-count{
+   margin-left:auto;background:#b82640;color:white;border-radius:999px;
+   padding:2px 7px;font-size:.65rem
+ }
+}
+@media(max-width:390px){
+ #appView.gestion-ui-ready .topbar .brand h1{font-size:.82rem}
+ #appView.gestion-ui-ready .topbar .brand img{width:36px;height:36px}
+ #appView.gestion-ui-ready .topbar-actions .icon-btn{width:35px;height:35px;min-width:35px}
+ #appView.gestion-ui-ready .layout{padding-left:9px;padding-right:9px}
+ #appView.gestion-ui-ready .stat{padding:11px;align-items:flex-start;gap:7px}
+ #appView.gestion-ui-ready .stat b{font-size:1.28rem}
+ #appView.gestion-ui-ready .gestion-dock-btn{font-size:.59rem}
+}
+@media(prefers-reduced-motion:reduce){
+ #appView.gestion-ui-ready .module-tab{transition:none}
+}
