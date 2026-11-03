@@ -1,0 +1,15 @@
+/* Instalación PWA · añadido sin modificar los cuatro módulos de gestión */
+.gestion-pwa-install{display:inline-flex;align-items:center;justify-content:center;gap:9px;border:1px solid #a5d7d8;border-radius:12px;background:#ecf8f7;color:#006a73;font-family:inherit;font-size:.8rem;font-weight:800;min-height:42px;padding:8px 13px;cursor:pointer;transition:background .15s,border-color .15s}
+.gestion-pwa-install:hover,.gestion-pwa-install:focus-visible{background:#dbf3f1;border-color:#007b85;outline-offset:2px}
+.gestion-pwa-login{margin-top:15px;width:100%}
+.gestion-pwa-header{min-height:40px;white-space:nowrap}
+.gestion-pwa-help{position:fixed;z-index:1000;inset:auto 16px 20px auto;width:min(370px,calc(100vw - 32px));padding:19px 18px 16px;background:#fff;border:1px solid #cae2e5;border-radius:19px;box-shadow:0 12px 38px rgba(0,32,91,.2);color:#17324a;font-family:Outfit,system-ui,sans-serif}
+.gestion-pwa-help h3{margin:0 34px 8px 0;color:#00205b;font-size:1.03rem}
+.gestion-pwa-help p{margin:0;color:#475569;font-size:.85rem;line-height:1.55}
+.gestion-pwa-help-close{position:absolute;right:9px;top:9px;border:0;background:#edf4f6;border-radius:9px;width:32px;height:32px;color:#00205b;cursor:pointer}
+.gestion-pwa-help[hidden],.gestion-pwa-install[hidden]{display:none!important}
+@media(max-width:780px){
+  .gestion-pwa-header{min-width:40px;width:40px;padding:0}
+  .gestion-pwa-header .gestion-pwa-label{display:none}
+  .gestion-pwa-help{bottom:90px;right:12px}
+}
