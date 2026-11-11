@@ -119,7 +119,7 @@ function renderCampaigns(list){
 }
 async function campaignAction(c,action,button){
  let message=action==='iniciar'
- ?'¿Confirmas iniciar la campaña «'+c.nombre+'» con '+c.total+' destinatarios? Se enviará por lotes y puede continuar durante varios días, respetando el límite de 400 intentos por 24 horas.'
+ ?'¿Confirmas iniciar la campaña «'+c.nombre+'» con '+c.total+' destinatarios? Verifica que estas personas puedan recibir la comunicación y se respeten sus preferencias. Se enviará por lotes, con límite de 400 intentos por 24 horas.'
  :'¿Confirmas '+action+' la campaña «'+c.nombre+'»?';
  if(!window.confirm(message))return;
  busy(button,true,'Actualizando…');
@@ -138,8 +138,9 @@ function applyTemplate(t){
  $('buttonText').value=t.boton_texto||'';$('buttonUrl').value=t.boton_url||'';renderPreview();
 }
 async function initialize(){
- const [{data:{session}},quota]=await Promise.all([client.auth.getSession(),call('admin_correos_cupo')]);
+ const {data:{session}}=await client.auth.getSession();
  if(!session)throw new Error('Debes iniciar sesión.');
+ const quota=await call('admin_correos_cupo');
  if(!quota||typeof quota.maximo!=='number')throw new Error('Acceso no autorizado');
  active=true;$('loginView').hidden=true;$('app').hidden=false;quiet();
  const [catalog,plantillas]=await Promise.all([call('admin_correos_catalogos'),call('admin_comunicacion_plantillas')]);
@@ -193,7 +194,7 @@ async function saveTemplate(){
  try{
   const data=compose();
   await call('admin_comunicacion_plantilla_guardar',{p_id:null,p_nombre:data.p_nombre,p_asunto:data.p_asunto,p_preencabezado:data.p_preencabezado,p_encabezado:data.p_encabezado,p_cuerpo_html:data.p_cuerpo_html,p_boton_texto:data.p_boton_texto,p_boton_url:data.p_boton_url});
-  const list=await call('admin_comunicacion_plantillas');templates=list||[];$('templateSelect').replaceChildren(make('option','','Mensaje nuevo'));
+  const list=await call('admin_comunicacion_plantillas');templates=list||[];const emptyOption=make('option','','Mensaje nuevo');emptyOption.value='';$('templateSelect').replaceChildren(emptyOption);
   templates.forEach((t,i)=>{const opt=make('option','',t.nombre);opt.value=String(i);$('templateSelect').append(opt)});
   banner('Plantilla guardada correctamente.');
  }catch(e){banner('Error al guardar la plantilla: '+e.message,true)}
@@ -229,6 +230,6 @@ document.addEventListener('DOMContentLoaded',async()=>{
  try{
   const {data:{session}}=await client.auth.getSession();
   if(session)await initialize();
- }catch(e){banner('No se pudo cargar el panel: '+e.message,true);$('loginView').hidden=false;$('app').hidden=true}
+ }catch(e){$('loginError').textContent='No se pudo cargar el panel: '+e.message;$('loginError').hidden=false;$('loginView').hidden=false;$('app').hidden=true}
 });
 })();
