@@ -5,6 +5,8 @@ const KEY='sb_publishable_bRnkA6PA8-v073nrw9zxiQ_8rVGiOn1';
 const $=id=>document.getElementById(id);
 const client=window.supabase?.createClient(URL,KEY,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:false}});
 const selected=new Set();
+const selectedStates=new Set();
+let availableStates=[];
 let people=[],page=0,total=0,limit=50,searchSerial=0,searchTimer=null,templates=[],active=false,previewChecksum='';
 const txt=v=>String(v==null?'':v);
 const esc=s=>txt(s).replace(/[&<>"']/g,x=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[x]));
@@ -23,7 +25,60 @@ function call(name,args={},time=20000){
  const timeout=new Promise((_,rej)=>timer=setTimeout(()=>rej(new Error('El servidor tardó demasiado. No se efectuó ninguna acción automática: actualiza los resultados antes de reintentar.')),time));
  return Promise.race([request,timeout]).then(({data,error})=>{if(error)throw error;return data}).finally(()=>clearTimeout(timer));
 }
-function query(){return {p_busqueda:$('search').value.trim(),p_pais:$('country').value,p_estados:$('stateFilter').value?[$('stateFilter').value]:[]}}
+function query(){
+ return {
+  p_busqueda:$('search').value.trim(),
+  p_pais:selectedStates.size?'VE':$('country').value,
+  p_estados:[...selectedStates].sort()
+ };
+}
+function renderStateControl(){
+ const unavailable=$('country').value!==''&&$('country').value!=='VE';
+ const wrapper=$('stateFilterWrap');
+ wrapper.classList.toggle('disabled',unavailable);
+ const menu=$('statesDropdown');
+ if(unavailable)menu.open=false;
+ const names=[...selectedStates].sort((a,b)=>a.localeCompare(b,'es'));
+ const summary=$('statesSummary');
+ summary.textContent=unavailable?'Solo para Venezuela':names.length===0?'Todos los estados':names.length===1?names[0]:names.length+' estados seleccionados';
+ summary.title=names.length?names.join(', '):'Sin filtro por estado';
+ summary.setAttribute('aria-disabled',unavailable?'true':'false');
+ summary.tabIndex=unavailable?-1:0;
+ $('statesList').querySelectorAll('input[type="checkbox"]').forEach(input=>{
+  input.checked=selectedStates.has(input.value);
+  input.disabled=unavailable;
+ });
+ $('statesSelectAll').disabled=unavailable||availableStates.length===0;
+ $('statesClear').disabled=unavailable||names.length===0;
+}
+function stateFiltersChanged(){
+ page=0;
+ renderStateControl();
+ loadPeople();
+}
+function addStateControls(states){
+ availableStates=[...new Set(states.filter(Boolean))];
+ const list=$('statesList');
+ list.replaceChildren();
+ availableStates.forEach(name=>{
+   const line=make('label','state-choice');
+   const input=make('input','');
+   input.type='checkbox';
+   input.value=name;
+   const caption=make('span','',name);
+   input.addEventListener('change',()=>{
+     if(input.checked){
+       if($('country').value!=='VE')$('country').value='VE';
+       selectedStates.add(input.value);
+     }else selectedStates.delete(input.value);
+     stateFiltersChanged();
+   });
+   line.append(input,caption);
+   list.append(line);
+ });
+ if(!availableStates.length)list.append(make('p','hint','No hay estados disponibles.'));
+ renderStateControl();
+}
 async function loadPeople(){
  const serial=++searchSerial;
  const args={...query(),p_offset:page*limit,p_limite:limit};
@@ -146,7 +201,7 @@ async function initialize(){
  const [catalog,plantillas]=await Promise.all([call('admin_correos_catalogos'),call('admin_comunicacion_plantillas')]);
  const countries=$('country');
  (catalog.paises||[]).forEach(item=>{const [code,name]=item.split('|');const option=make('option','',name||code);option.value=code;countries.append(option)});
- (catalog.estados||[]).forEach(item=>{const option=make('option','',item);option.value=item;$('stateFilter').append(option)});
+ addStateControls(catalog.estados||[]);
  templates=plantillas||[];templates.forEach((t,i)=>{const opt=make('option','',t.nombre);opt.value=String(i);$('templateSelect').append(opt)});
  selectedChanged();renderPreview();
  await Promise.all([loadPeople(),refreshDashboard()]);
@@ -205,8 +260,24 @@ function events(){
  $('logout').addEventListener('click',async()=>{await client.auth.signOut();location.reload()});
  $('searchBtn').addEventListener('click',()=>{page=0;loadPeople()});
  $('search').addEventListener('input',()=>{clearTimeout(searchTimer);searchTimer=setTimeout(()=>{page=0;loadPeople()},400)});
- $('country').addEventListener('change',()=>{page=0;$('stateFilter').value='';$('stateFilter').disabled=!!$('country').value&&$('country').value!=='VE';loadPeople()});
- $('stateFilter').addEventListener('change',()=>{page=0;loadPeople()});
+ $('country').addEventListener('change',()=>{
+   selectedStates.clear();
+   $('statesDropdown').open=false;
+   stateFiltersChanged();
+ });
+ $('statesSelectAll').addEventListener('click',()=>{
+   if($('country').value!== 'VE')$('country').value='VE';
+   selectedStates.clear();
+   availableStates.forEach(state=>selectedStates.add(state));
+   stateFiltersChanged();
+ });
+ $('statesClear').addEventListener('click',()=>{
+   selectedStates.clear();
+   stateFiltersChanged();
+ });
+ $('statesDropdown').addEventListener('toggle',()=>{
+   renderStateControl();
+ });
  $('prev').addEventListener('click',()=>{if(page>0){page--;loadPeople()}});
  $('next').addEventListener('click',()=>{if((page+1)*limit<total){page++;loadPeople()}});
  $('clearSelection').addEventListener('click',()=>{selected.clear();renderPeople();banner('Selección vaciada.')});
