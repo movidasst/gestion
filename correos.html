@@ -16,7 +16,7 @@
 </div></header>
 <main class="wrap">
 <section id="loginView" class="card login">
-<div class="eyebrow">ACCESO PRIVADO</div><h1>Envíos de La Movida</h1><p>Accede con las credenciales de Gestión. Solo cuentas administradoras pueden consultar destinatarios y enviar campañas.</p>
+<div class="eyebrow">ACCESO PRIVADO</div><h1>Envíos de La Movida</h1><p>Accede con las credenciales de Gestión. Solo cuentas administradoras pueden consultar destinatarios y preparar envíos.</p>
 <form id="loginForm"><label>Correo administrativo<input type="email" id="adminEmail" autocomplete="username" required></label><label>Contraseña<input type="password" id="adminPassword" autocomplete="current-password" required></label><button type="submit" class="btn primary" id="loginBtn">Ingresar</button></form>
 <p id="loginError" class="notice error" hidden></p></section>
 <section id="app" hidden>
@@ -58,11 +58,11 @@
 <section class="panel compose"><div class="section-head"><div><div class="eyebrow">PASO 2</div><h2>Preparar el mensaje</h2><p>Editor sencillo: el sistema convierte el texto en un correo legible con el logo de La Movida.</p></div></div>
 <div class="compose-body">
 <div class="field"><label for="templateSelect">Usar una plantilla guardada</label><select id="templateSelect"><option value="">Mensaje nuevo</option></select></div>
-<label class="field">Nombre interno de campaña<input id="campaignName" maxlength="130" placeholder="Ej. Invitación curso de investigación"></label>
+<label class="field">Referencia interna del envío<input id="campaignName" maxlength="130" placeholder="Ej. Invitación curso de investigación"></label>
 <label class="field">Asunto del correo<input id="subject" maxlength="180" placeholder="Ej. Tenemos una invitación para ti" required></label>
 <label class="field">Título destacado<input id="heading" maxlength="160" placeholder="Ej. Conoce nuestras próximas actividades"></label>
 <label class="field">Mensaje<textarea id="bodyText" rows="8" maxlength="12000" placeholder="Hola {{nombre}},&#10;&#10;Queremos compartir contigo...&#10;&#10;Gracias por ser parte de La Movida."></textarea></label>
-<p class="hint">Puedes usar <code>{{nombre}}</code> o <code>{{pais}}</code>. Para enlaces, utiliza el botón inferior.</p>
+<p class="hint">Puedes usar <code>{{nombres}}</code> o <code>{{pais}}</code>. Si eliges la plantilla de cursos, sustituye todos los campos entre corchetes y el enlace de inscripción.</p>
 <div class="input-grid"><label class="field">Texto del botón (opcional)<input id="buttonText" placeholder="Ver información" maxlength="100"></label><label class="field">URL del botón (https://)<input id="buttonUrl" placeholder="https://movidasst.com/" type="url"></label></div>
 <label class="field">Programar envío (opcional)<input id="schedule" type="datetime-local"></label>
 <div class="actions"><button id="saveTemplate" class="btn soft" type="button">Guardar plantilla</button><button id="testEmail" class="btn outline" type="button">Enviar prueba a mi correo</button></div>
@@ -77,7 +77,7 @@
 <section class="panel preview"><div class="section-head"><div><div class="eyebrow">VISTA PREVIA</div><h2>Así se verá tu correo</h2><p>Vista segura, sin scripts. Comprueba el contenido antes de enviarlo.</p></div></div><iframe id="emailPreview" sandbox="" title="Vista previa del correo" referrerpolicy="no-referrer"></iframe></section>
 </div>
 
-<div class="legal"><strong>Importante:</strong> utiliza el sistema para comunicaciones pertinentes a tu comunidad. Los destinatarios excluidos no reciben nuevos correos. Las campañas comerciales deben respetar preferencias, bajas y normas aplicables.</div>
+<div class="legal"><strong>Importante:</strong> utiliza el sistema para comunicaciones pertinentes a tu comunidad. Los destinatarios excluidos no reciben nuevos correos. Los envíos comerciales deben respetar las preferencias de los destinatarios, sus solicitudes de baja y las normas aplicables.</div>
 </section></main>
 <footer>La Movida de SST+ · De la Reacción a la Prevención · <a href="https://registro.movidasst.com/privacidad.html" target="_blank" rel="noopener">Privacidad</a></footer>
 </body></html>
