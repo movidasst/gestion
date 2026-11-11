@@ -8,7 +8,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <link href="correos.css?v=20261111-3" rel="stylesheet">
 <script defer src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script defer src="correos.js?v=20261111-3"></script>
+<script defer src="correos.js?v=20261111-directo1"></script>
 </head><body>
 <header class="top"><div class="wrap top-inner">
 <a href="index.html" aria-label="Volver a Gestión"><img class="logo" src="https://www.movidasst.com/logo-horizontal-movida-sst-plus.webp" alt="La Movida de SST+"></a>
@@ -69,9 +69,12 @@
 <div class="notice muted">El envío de prueba se agrega a la misma cola segura y consume un intento del cupo diario. Cada envío requiere confirmación explícita.</div>
 <div class="actions send"><button id="createCampaign" class="btn primary" type="button">Enviar a seleccionados</button></div>
 <div id="sendReceipt" class="notice muted" hidden>
-  <strong id="sendReceiptTitle">Envío preparado</strong>
-  <p id="sendReceiptText">Tu envío se procesará respetando el cupo diario.</p>
-  <button type="button" class="btn outline small" id="cancelActive" hidden>Cancelar los mensajes pendientes de este envío</button>
+  <strong id="sendReceiptTitle">Estado del envío</strong>
+  <p id="sendReceiptText">Aquí verás si el proveedor aceptó el correo.</p>
+  <div class="actions receipt-actions">
+    <button type="button" class="btn outline small" id="checkSendStatus" hidden>Comprobar estado</button>
+    <button type="button" class="btn outline small" id="cancelActive" hidden>Cancelar los mensajes pendientes de este envío</button>
+  </div>
 </div>
 </div></section>
 <section class="panel preview"><div class="section-head"><div><div class="eyebrow">VISTA PREVIA</div><h2>Así se verá tu correo</h2><p>Vista segura, sin scripts. Comprueba el contenido antes de enviarlo.</p></div></div><iframe id="emailPreview" sandbox="" title="Vista previa del correo" referrerpolicy="no-referrer"></iframe></section>
