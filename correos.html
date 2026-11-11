@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="es"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex,nofollow,noarchive"><meta name="theme-color" content="#f8fafc">
+<title>Centro de Correos | La Movida de SST+</title>
+<link rel="icon" href="https://www.movidasst.com/pwa/icon-512.png?v=20261024logo-nuevo">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link href="correos.css?v=20261111-1" rel="stylesheet">
+<script defer src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script defer src="correos.js?v=20261111-1"></script>
+</head><body>
+<header class="top"><div class="wrap top-inner">
+<a href="index.html" aria-label="Volver a Gestión"><img class="logo" src="https://www.movidasst.com/logo-horizontal-movida-sst-plus.webp" alt="La Movida de SST+"></a>
+<div class="head-right"><div><strong>Centro de Correos</strong><small>Gestión · Envíos controlados</small></div><a class="btn soft small" href="index.html">← Volver a Gestión</a></div>
+</div></header>
+<main class="wrap">
+<section id="loginView" class="card login">
+<div class="eyebrow">ACCESO PRIVADO</div><h1>Envíos de La Movida</h1><p>Accede con las credenciales de Gestión. Solo cuentas administradoras pueden consultar destinatarios y enviar campañas.</p>
+<form id="loginForm"><label>Correo administrativo<input type="email" id="adminEmail" autocomplete="username" required></label><label>Contraseña<input type="password" id="adminPassword" autocomplete="current-password" required></label><button type="submit" class="btn primary" id="loginBtn">Ingresar</button></form>
+<p id="loginError" class="notice error" hidden></p></section>
+<section id="app" hidden>
+<div class="hero"><div><div class="eyebrow">COMUNICACIONES · NUEVO MÓDULO</div><h1>Correos a integrantes</h1><p>Selecciona personas, revisa tu mensaje y envía con control de cuota. Los correos de registro tienen prioridad.</p></div><button class="btn soft small" id="logout">Cerrar sesión</button></div>
+<div class="stats">
+<div class="stat"><small>Máximo por 24 h</small><strong>400</strong></div>
+<div class="stat"><small>Intentos utilizados</small><strong id="used">—</strong></div>
+<div class="stat"><small>Cupo disponible</small><strong id="remaining">—</strong></div>
+<div class="stat"><small>Personas seleccionadas</small><strong id="selectedCount">0</strong></div>
+</div>
+<div id="status" class="notice" role="status" aria-live="polite" hidden></div>
+<section class="panel"><div class="section-head"><div><div class="eyebrow">PASO 1</div><h2>¿A quién enviar?</h2><p>Busca por nombre o correo y marca una o varias personas. La selección se conserva al cambiar los filtros o páginas.</p></div><button id="clearSelection" type="button" class="btn soft small">Limpiar selección</button></div>
+<div class="filters">
+<label class="field grow">Nombre, correo o documento<input id="search" placeholder="Buscar integrantes..." autocomplete="off"></label>
+<label class="field">País<select id="country"><option value="">Todos los países</option></select></label>
+<label class="field">Estado venezolano<select id="stateFilter"><option value="">Todos los estados</option></select></label>
+<button class="btn soft" id="searchBtn" type="button">Buscar</button>
+</div>
+<div class="toolbar"><div id="listInfo" class="hint">Carga los integrantes para seleccionar.</div><button id="selectAllResults" class="btn outline small" type="button">Seleccionar todos los filtrados</button></div>
+<div id="people" class="people" aria-live="polite"><p class="empty">Cargando integrantes…</p></div>
+<div class="pagebar"><button id="prev" type="button" class="btn soft small">Anterior</button><span id="pageText">Página 1</span><button id="next" type="button" class="btn soft small">Siguiente</button></div>
+<div class="selection"><span id="selectionLabel">0 personas seleccionadas</span><button class="btn outline small" id="previewAudience" type="button">Validar destinatarios</button></div>
+<div class="hint" id="audiencePreview">La validación elimina los correos repetidos, inválidos o excluidos.</div>
+</section>
+<div class="two-col">
+<section class="panel compose"><div class="section-head"><div><div class="eyebrow">PASO 2</div><h2>Preparar el mensaje</h2><p>Editor sencillo: el sistema convierte el texto en un correo legible con el logo de La Movida.</p></div></div>
+<div class="compose-body">
+<div class="field"><label for="templateSelect">Usar una plantilla guardada</label><select id="templateSelect"><option value="">Mensaje nuevo</option></select></div>
+<label class="field">Nombre interno de campaña<input id="campaignName" maxlength="130" placeholder="Ej. Invitación curso de investigación"></label>
+<label class="field">Asunto del correo<input id="subject" maxlength="180" placeholder="Ej. Tenemos una invitación para ti" required></label>
+<label class="field">Título destacado<input id="heading" maxlength="160" placeholder="Ej. Conoce nuestras próximas actividades"></label>
+<label class="field">Mensaje<textarea id="bodyText" rows="8" maxlength="12000" placeholder="Hola {{nombre}},&#10;&#10;Queremos compartir contigo...&#10;&#10;Gracias por ser parte de La Movida."></textarea></label>
+<p class="hint">Puedes usar <code>{{nombre}}</code> o <code>{{pais}}</code>. Para enlaces, utiliza el botón inferior.</p>
+<div class="input-grid"><label class="field">Texto del botón (opcional)<input id="buttonText" placeholder="Ver información" maxlength="100"></label><label class="field">URL del botón (https://)<input id="buttonUrl" placeholder="https://movidasst.com/" type="url"></label></div>
+<label class="field">Programar envío (opcional)<input id="schedule" type="datetime-local"></label>
+<div class="actions"><button id="saveTemplate" class="btn soft" type="button">Guardar plantilla</button><button id="testEmail" class="btn outline" type="button">Enviar prueba a mi correo</button></div>
+<div class="notice muted">El envío de prueba se agrega a la misma cola segura y consume un intento del cupo diario. Las campañas no se envían hasta tu confirmación.</div>
+<div class="actions send"><button id="createCampaign" class="btn primary" type="button">Crear campaña en borrador</button></div>
+</div></section>
+<section class="panel preview"><div class="section-head"><div><div class="eyebrow">VISTA PREVIA</div><h2>Así se verá tu correo</h2><p>Vista segura, sin scripts. Comprueba el contenido antes de enviarlo.</p></div></div><iframe id="emailPreview" sandbox="" title="Vista previa del correo" referrerpolicy="no-referrer"></iframe></section>
+</div>
+<section class="panel history"><div class="section-head"><div><div class="eyebrow">PASO 3</div><h2>Campañas y seguimiento</h2><p>Inicia, pausa, reanuda o cancela campañas. El motor avanza en lotes y respeta el cupo.</p></div><button class="btn soft small" id="refresh">Actualizar</button></div><div id="campaigns" class="campaigns"><p class="empty">Todavía no se han cargado las campañas.</p></div></section>
+<div class="legal"><strong>Importante:</strong> utiliza el sistema para comunicaciones pertinentes a tu comunidad. Los destinatarios excluidos no reciben nuevos correos. Las campañas comerciales deben respetar preferencias, bajas y normas aplicables.</div>
+</section></main>
+<footer>La Movida de SST+ · De la Reacción a la Prevención · <a href="https://registro.movidasst.com/privacidad.html" target="_blank" rel="noopener">Privacidad</a></footer>
+</body></html>
