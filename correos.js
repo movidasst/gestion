@@ -16,7 +16,7 @@ function banner(message,isError=false){
 }
 function quiet(){ $('status').hidden=true;}
 function busy(button,yes,label){
- if(!button)return; if(yes){button.dataset.previousText=button.textContent;button.disabled=true;button.textContent=label||'Procesando…'}
+ if(!button)return; if(yes){if(!button.disabled)button.dataset.previousText=button.textContent;button.disabled=true;button.textContent=label||'Procesando…'}
  else{button.disabled=false;button.textContent=button.dataset.previousText||button.textContent}
 }
 function call(name,args={},time=20000){
@@ -154,7 +154,7 @@ async function refreshDashboard(){
 }
 function applyTemplate(t){
  $('campaignName').value=t.nombre||'';$('subject').value=t.asunto||'';$('heading').value=t.encabezado||'';
- const div=document.createElement('div');div.innerHTML=t.cuerpo_html||'';div.querySelectorAll('br').forEach(x=>x.replaceWith('\n'));
+ const div=document.createElement('div');div.innerHTML=t.cuerpo_html||'';div.querySelectorAll('strong,b').forEach(x=>x.replaceWith('**'+x.textContent+'**'));div.querySelectorAll('br').forEach(x=>x.replaceWith('\n'));
  div.querySelectorAll('p,div').forEach(x=>x.after('\n\n'));
  $('bodyText').value=(div.textContent||'').replace(/\n{3,}/g,'\n\n').trim();
  $('buttonText').value=t.boton_texto||'';$('buttonUrl').value=t.boton_url||'';renderPreview();
