@@ -7,7 +7,7 @@ const client=window.supabase?.createClient(URL,KEY,{auth:{persistSession:true,au
 const selected=new Set();
 const selectedStates=new Set();
 let availableStates=[];
-let people=[],page=0,total=0,limit=50,searchSerial=0,searchTimer=null,templates=[],active=false,previewChecksum='';
+let people=[],page=0,total=0,limit=50,searchSerial=0,searchTimer=null,templates=[],active=false,previewChecksum='',lastSendId=null;
 const txt=v=>String(v==null?'':v);
 const esc=s=>txt(s).replace(/[&<>"']/g,x=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[x]));
 const make=(tag,cls,value)=>{const e=document.createElement(tag);if(cls)e.className=cls;if(value!==undefined)e.textContent=txt(value);return e};
@@ -22,7 +22,7 @@ function busy(button,yes,label){
 function call(name,args={},time=20000){
  const request=client.rpc(name,args);
  let timer;
- const timeout=new Promise((_,rej)=>timer=setTimeout(()=>rej(new Error('El servidor tardó demasiado. No se efectuó ninguna acción automática: actualiza los resultados antes de reintentar.')),time));
+ const timeout=new Promise((_,rej)=>timer=setTimeout(()=>rej(new Error('El servidor tardó demasiado y no se pudo confirmar el resultado.')),time));
  return Promise.race([request,timeout]).then(({data,error})=>{if(error)throw error;return data}).finally(()=>clearTimeout(timer));
 }
 function query(){
@@ -123,7 +123,7 @@ function bodyToHtml(plain){
 function renderPreview(){
  const h=esc($('heading').value.trim()||'Título del correo');
  let content=bodyToHtml($('bodyText').value.trim()||'Tu mensaje se mostrará aquí.');
- content=content.replace(/\{\{nombre\}\}/gi,'Profesional').replace(/\{\{pais\}\}/gi,'Tu país');
+ content=content.replace(/\{\{(?:nombre|nombres)\}\}/gi,'Profesional').replace(/\{\{pais\}\}/gi,'Tu país');
  const url=$('buttonUrl').value.trim(),buttonName=$('buttonText').value.trim();
  const button=/^https:\/\//i.test(url)&&buttonName?'<div style="padding:14px 0;text-align:center"><a href="'+esc(url)+'" style="padding:13px 20px;border-radius:11px;background:#007b85;text-decoration:none;color:#fff;font-weight:700">'+esc(buttonName)+'</a></div>':'';
  $('emailPreview').srcdoc='<!doctype html><html><meta charset="utf-8"><body style="font-family:Arial,sans-serif;background:#f1f6f8;margin:0;padding:22px 14px;color:#344e63"><div style="background:white;max-width:640px;margin:auto;border-radius:16px;overflow:hidden;box-shadow:0 10px 32px #00205b17"><header style="text-align:center;padding:22px;border-bottom:1px solid #e6eff1"><img alt="La Movida SST+" src="https://www.movidasst.com/logo-horizontal-movida-sst-plus.webp" width="205" style="max-width:90%;height:auto"></header><article style="padding:26px 22px"><h1 style="font-size:23px;color:#00205b">'+h+'</h1><div style="font-size:15px;line-height:1.65">'+content+'</div>'+button+'</article><footer style="background:#00205b;color:#fff;text-align:center;padding:20px;font-size:12px">La Movida de SST+ · De la Reacción a la Prevención<br><small style="color:#d3e5ee">Recibirás una opción para dejar de recibir comunicaciones.</small></footer></div></body></html>';
@@ -134,6 +134,8 @@ function compose(){
  if(url&&!/^https:\/\//i.test(url))throw new Error('El enlace del botón debe comenzar con https://');
  if(bt&&!url||url&&!bt)throw new Error('Completa tanto el texto como el enlace del botón.');
  if(asunto.length>180||body.length>12000)throw new Error('El asunto o el mensaje son demasiado largos.');
+ const unfinished=/\[(?:NOMBRE DEL CURSO|FECHAS|HORARIO Y PAÍS|MODALIDAD|PRECIO|BENEFICIOS Y MATERIALES DEL CURSO)\]/i;
+ if(unfinished.test(asunto+' '+heading+' '+body))throw new Error('Sustituye todos los datos entre corchetes de la plantilla del curso antes de enviar.');
  return {p_nombre:name,p_asunto:asunto,p_preencabezado:asunto,p_encabezado:heading,p_cuerpo_html:bodyToHtml(body),p_boton_texto:bt||null,p_boton_url:url||null};
 }
 async function validateAudience(){
@@ -146,44 +148,9 @@ async function validateAudience(){
  return result;
 }
 async function refreshDashboard(){
- const [quota,campaigns]=await Promise.all([
-  call('admin_correos_cupo'),
-  call('admin_comunicacion_campanas')
- ]);
+ const quota=await call('admin_correos_cupo');
  $('used').textContent=Number(quota.usados||0).toLocaleString('es');
  $('remaining').textContent=Number(quota.disponibles||0).toLocaleString('es');
- renderCampaigns(campaigns||[]);
-}
-function renderCampaigns(list){
- $('campaigns').replaceChildren();
- if(!list.length){$('campaigns').append(make('p','empty','Sin campañas creadas.'));return}
- list.forEach(c=>{
-  const box=make('div','campaign'),left=make('div',''),actions=make('div','campaign-actions');
-  const h=make('h3','',c.nombre||'Campaña');const stamp=make('small','',new Date(c.created_at).toLocaleString('es-CL'));
-  const status=make('span','campaign-status',c.estado);
-  const sent=Number(c.enviados||0),max=Number(c.total||0),n=make('p','',sent+' enviados · '+c.pendientes+' pendientes · '+c.fallidos+' fallidos · '+max+' destinatarios');
-  const track=make('div','bar'),filled=make('span','');filled.style.width=(max?Math.min(100,Math.round(100*sent/max)):0)+'%';track.append(filled);
-  left.append(h,status,stamp,n,track);
-  const possible={borrador:[['iniciar','Confirmar inicio'],['cancelar','Cancelar']],enviando:[['pausar','Pausar'],['cancelar','Cancelar']],programada:[['pausar','Pausar'],['cancelar','Cancelar']],pausada:[['reanudar','Reanudar'],['cancelar','Cancelar']]};
-  (possible[c.estado]||[]).forEach(([action,label])=>{
-   const b=make('button','btn '+(action==='iniciar'?'primary':'soft')+' small',label);b.type='button';
-   b.addEventListener('click',()=>campaignAction(c,action,b));actions.append(b);
-  });
-  box.append(left,actions);$('campaigns').append(box);
- });
-}
-async function campaignAction(c,action,button){
- let message=action==='iniciar'
- ?'¿Confirmas iniciar la campaña «'+c.nombre+'» con '+c.total+' destinatarios? Verifica que estas personas puedan recibir la comunicación y se respeten sus preferencias. Se enviará por lotes, con límite de 400 intentos por 24 horas.'
- :'¿Confirmas '+action+' la campaña «'+c.nombre+'»?';
- if(!window.confirm(message))return;
- busy(button,true,'Actualizando…');
- try{
-  const r=await call('admin_comunicacion_campana_accion',{p_id:c.id,p_accion:action});
-  banner('Campaña actualizada: '+(r?.estado||action)+'.');
-  await refreshDashboard();
- }catch(e){banner('No se pudo cambiar el estado: '+e.message,true);await refreshDashboard().catch(()=>{})}
- finally{busy(button,false)}
 }
 function applyTemplate(t){
  $('campaignName').value=t.nombre||'';$('subject').value=t.asunto||'';$('heading').value=t.encabezado||'';
@@ -216,20 +183,70 @@ async function login(){
   $('loginError').textContent=e.message||'No se pudo iniciar sesión.';$('loginError').hidden=false;
  }finally{busy(b,false)}
 }
-async function createCampaign(){
- const button=$('createCampaign');busy(button,true,'Verificando…');
+function uniqueSendId(payload){
+ const key="movidasst_correos_envio_solicitud";
+ const signature=JSON.stringify(payload);
  try{
-  const data=compose(),validation=await validateAudience();
+  const previous=JSON.parse(sessionStorage.getItem(key)||"null");
+  if(previous&&previous.signature===signature&&Date.now()-previous.created<86400000&&previous.id)return previous.id;
+  const id=crypto.randomUUID();
+  sessionStorage.setItem(key,JSON.stringify({id,signature,created:Date.now()}));
+  return id;
+ }catch{
+  if(!window.crypto?.randomUUID)throw new Error("Tu navegador no admite confirmación segura de envíos.");
+  return window.crypto.randomUUID();
+ }
+}
+async function createCampaign(){
+ const button=$('createCampaign');
+ if(button.disabled)return;
+ busy(button,true,'Validando destinatarios…');
+ try{
+  const data=compose();
+  const validation=await validateAudience();
   const ids=[...selected].sort((a,b)=>a-b);
-  if(!window.confirm('Crear un borrador con '+validation.correos_validos+' correos válidos? No se enviará hasta confirmar el inicio desde Campañas.'))return;
   let schedule=$('schedule').value||null;
-  if(schedule){const dt=new Date(schedule);if(Number.isNaN(dt.getTime()))throw new Error('Fecha de programación no válida');if(dt.getTime()<Date.now()-60000)throw new Error('La programación debe estar en el futuro');schedule=dt.toISOString()}
-  const result=await call('admin_comunicacion_campana_crear',{...data,p_filtros:{integrante_ids:ids},p_programada_at:schedule},45000);
+  if(schedule){
+   const dt=new Date(schedule);
+   if(Number.isNaN(dt.getTime()))throw new Error('La fecha de programación no es válida.');
+   if(dt.getTime()<Date.now()-60000)throw new Error('La fecha de programación debe estar en el futuro.');
+   schedule=dt.toISOString();
+  }
+  const answer=schedule
+   ?'¿Confirmas PROGRAMAR el envío para '+new Date(schedule).toLocaleString('es-CL')+' a '+validation.correos_validos+' correos válidos?'
+   :'¿Confirmas ENVIAR a '+validation.correos_validos+' correos válidos? El sistema utilizará lotes y un máximo de 400 intentos por 24 horas.';
+  if(!window.confirm(answer+' Solo se utilizarán contactos habilitados y se respetarán sus preferencias de baja.'))return;
+  const payload={...data,p_filtros:{integrante_ids:ids},p_programada_at:schedule};
+  const id=uniqueSendId(payload);
+  busy(button,true,'Confirmando el envío…');
+  const result=await call('admin_correos_enviar',{...payload,p_solicitud_id:id},45000);
+  if(!result?.ok||!result.id)throw new Error('El servidor no devolvió confirmación de envío.');
+  try{sessionStorage.removeItem('movidasst_correos_envio_solicitud')}catch{}
+  lastSendId=result.id;
+  $('sendReceipt').hidden=false;
+  $('sendReceiptTitle').textContent=schedule?'Envío programado':'Envío puesto en cola';
+  $('sendReceiptText').textContent=result.destinatarios+' destinatario(s). '+(schedule?'Se procesará a partir de la fecha elegida.':'El motor enviará por lotes cuando haya cupo.')+' El límite es de 400 intentos cada 24 horas. No se muestran campañas antiguas.';
+  $('cancelActive').hidden=false;
   selected.clear();renderPeople();
-  banner('Borrador creado con '+result.destinatarios+' destinatarios. Revisa la lista de campañas y pulsa «Confirmar inicio» cuando quieras enviarlo.');
-  await refreshDashboard();
-  $('campaigns').scrollIntoView({behavior:'smooth',block:'start'});
- }catch(e){banner('No se pudo crear la campaña: '+e.message,true)}
+  banner('Envío confirmado para '+result.destinatarios+' destinatario(s). '+(result.reutilizado?'Se recuperó una solicitud anterior sin duplicarla.':'No necesitas volver a enviarlo.'));
+  try{await refreshDashboard()}catch(e){banner('El envío se guardó, pero no se pudo actualizar la cuota: '+e.message,true)}
+  $('sendReceipt').scrollIntoView({behavior:'smooth',block:'center'});
+ }catch(e){
+  banner('No se pudo verificar el resultado del envío: '+(e.message||'error desconocido')+'. Si hubo un corte de conexión, puedes reintentar sin cambiar los datos: se reutilizará la misma solicitud para evitar duplicados.',true);
+ }finally{busy(button,false)}
+}
+async function cancelCurrent(){
+ if(!lastSendId)return;
+ if(!window.confirm('¿Cancelar los mensajes de este envío que aún no se hayan enviado? Los correos ya enviados no pueden recuperarse.'))return;
+ const button=$('cancelActive');busy(button,true,'Cancelando pendientes…');
+ try{
+  const result=await call('admin_comunicacion_campana_accion',{p_id:lastSendId,p_accion:'cancelar'});
+  if(result?.estado!=='cancelada')throw new Error('La cancelación no pudo confirmarse.');
+  $('sendReceiptTitle').textContent='Se cancelaron los mensajes pendientes';
+  $('sendReceiptText').textContent='Los mensajes que ya salieron no pueden recuperarse. Los pendientes de este envío quedaron cancelados.';
+  $('cancelActive').hidden=true;
+  banner('Cancelados los envíos pendientes.');
+ }catch(e){banner('No se pudo cancelar: '+e.message,true)}
  finally{busy(button,false)}
 }
 async function sendTest(){
@@ -293,7 +310,7 @@ function events(){
  $('saveTemplate').addEventListener('click',saveTemplate);
  $('testEmail').addEventListener('click',sendTest);
  $('createCampaign').addEventListener('click',createCampaign);
- $('refresh').addEventListener('click',async()=>{const b=$('refresh');busy(b,true,'Actualizando…');try{await refreshDashboard();banner('Estados actualizados.')}catch(e){banner('No se pudo actualizar: '+e.message,true)}finally{busy(b,false)}});
+ $('cancelActive').addEventListener('click',cancelCurrent);
 }
 document.addEventListener('DOMContentLoaded',async()=>{
  if(!client){$('loginError').textContent='No se pudo cargar el módulo de autenticación. Verifica tu conexión.';$('loginError').hidden=false;return}
