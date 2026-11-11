@@ -6,9 +6,9 @@
 <link rel="icon" href="https://www.movidasst.com/pwa/icon-512.png?v=20261024logo-nuevo">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-<link href="correos.css?v=20261111-2" rel="stylesheet">
+<link href="correos.css?v=20261111-3" rel="stylesheet">
 <script defer src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script defer src="correos.js?v=20261111-2"></script>
+<script defer src="correos.js?v=20261111-3"></script>
 </head><body>
 <header class="top"><div class="wrap top-inner">
 <a href="index.html" aria-label="Volver a Gestión"><img class="logo" src="https://www.movidasst.com/logo-horizontal-movida-sst-plus.webp" alt="La Movida de SST+"></a>
@@ -52,7 +52,7 @@
 <div id="people" class="people" aria-live="polite"><p class="empty">Cargando integrantes…</p></div>
 <div class="pagebar"><button id="prev" type="button" class="btn soft small">Anterior</button><span id="pageText">Página 1</span><button id="next" type="button" class="btn soft small">Siguiente</button></div>
 <div class="selection"><span id="selectionLabel">0 personas seleccionadas</span><button class="btn outline small" id="previewAudience" type="button">Validar destinatarios</button></div>
-<div class="hint" id="audiencePreview">La validación elimina los correos repetidos, inválidos o excluidos.</div>
+<div class="hint" id="audiencePreview">La validación descarta los correos repetidos, inválidos o excluidos.</div>
 </section>
 <div class="two-col">
 <section class="panel compose"><div class="section-head"><div><div class="eyebrow">PASO 2</div><h2>Preparar el mensaje</h2><p>Editor sencillo: el sistema convierte el texto en un correo legible con el logo de La Movida.</p></div></div>
@@ -66,12 +66,17 @@
 <div class="input-grid"><label class="field">Texto del botón (opcional)<input id="buttonText" placeholder="Ver información" maxlength="100"></label><label class="field">URL del botón (https://)<input id="buttonUrl" placeholder="https://movidasst.com/" type="url"></label></div>
 <label class="field">Programar envío (opcional)<input id="schedule" type="datetime-local"></label>
 <div class="actions"><button id="saveTemplate" class="btn soft" type="button">Guardar plantilla</button><button id="testEmail" class="btn outline" type="button">Enviar prueba a mi correo</button></div>
-<div class="notice muted">El envío de prueba se agrega a la misma cola segura y consume un intento del cupo diario. Las campañas no se envían hasta tu confirmación.</div>
-<div class="actions send"><button id="createCampaign" class="btn primary" type="button">Crear campaña en borrador</button></div>
+<div class="notice muted">El envío de prueba se agrega a la misma cola segura y consume un intento del cupo diario. Cada envío requiere confirmación explícita.</div>
+<div class="actions send"><button id="createCampaign" class="btn primary" type="button">Enviar a seleccionados</button></div>
+<div id="sendReceipt" class="notice muted" hidden>
+  <strong id="sendReceiptTitle">Envío preparado</strong>
+  <p id="sendReceiptText">Tu envío se procesará respetando el cupo diario.</p>
+  <button type="button" class="btn outline small" id="cancelActive" hidden>Cancelar los mensajes pendientes de este envío</button>
+</div>
 </div></section>
 <section class="panel preview"><div class="section-head"><div><div class="eyebrow">VISTA PREVIA</div><h2>Así se verá tu correo</h2><p>Vista segura, sin scripts. Comprueba el contenido antes de enviarlo.</p></div></div><iframe id="emailPreview" sandbox="" title="Vista previa del correo" referrerpolicy="no-referrer"></iframe></section>
 </div>
-<section class="panel history"><div class="section-head"><div><div class="eyebrow">PASO 3</div><h2>Campañas y seguimiento</h2><p>Inicia, pausa, reanuda o cancela campañas. El motor avanza en lotes y respeta el cupo.</p></div><button class="btn soft small" id="refresh">Actualizar</button></div><div id="campaigns" class="campaigns"><p class="empty">Todavía no se han cargado las campañas.</p></div></section>
+
 <div class="legal"><strong>Importante:</strong> utiliza el sistema para comunicaciones pertinentes a tu comunidad. Los destinatarios excluidos no reciben nuevos correos. Las campañas comerciales deben respetar preferencias, bajas y normas aplicables.</div>
 </section></main>
 <footer>La Movida de SST+ · De la Reacción a la Prevención · <a href="https://registro.movidasst.com/privacidad.html" target="_blank" rel="noopener">Privacidad</a></footer>
