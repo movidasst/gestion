@@ -6,9 +6,9 @@
 <link rel="icon" href="https://www.movidasst.com/pwa/icon-512.png?v=20261024logo-nuevo">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-<link href="correos.css?v=20261111-1" rel="stylesheet">
+<link href="correos.css?v=20261111-2" rel="stylesheet">
 <script defer src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script defer src="correos.js?v=20261111-1"></script>
+<script defer src="correos.js?v=20261111-2"></script>
 </head><body>
 <header class="top"><div class="wrap top-inner">
 <a href="index.html" aria-label="Volver a Gestión"><img class="logo" src="https://www.movidasst.com/logo-horizontal-movida-sst-plus.webp" alt="La Movida de SST+"></a>
@@ -32,7 +32,20 @@
 <div class="filters">
 <label class="field grow">Nombre, correo o documento<input id="search" placeholder="Buscar integrantes..." autocomplete="off"></label>
 <label class="field">País<select id="country"><option value="">Todos los países</option></select></label>
-<label class="field">Estado venezolano<select id="stateFilter"><option value="">Todos los estados</option></select></label>
+<div class="field state-multi" id="stateFilterWrap">
+  <span id="stateLabel">Estados de Venezuela <small>(selección múltiple)</small></span>
+  <details id="statesDropdown" class="states-dropdown">
+    <summary id="statesSummary">Todos los estados</summary>
+    <div class="states-panel">
+      <p class="hint">Marca varios estados. Los resultados incluirán integrantes de cualquiera de los seleccionados.</p>
+      <div id="statesList" class="states-list" role="group" aria-labelledby="stateLabel"></div>
+      <div class="states-actions">
+        <button class="btn soft small" type="button" id="statesSelectAll">Marcar todos</button>
+        <button class="btn outline small" type="button" id="statesClear">Quitar selección</button>
+      </div>
+    </div>
+  </details>
+</div>
 <button class="btn soft" id="searchBtn" type="button">Buscar</button>
 </div>
 <div class="toolbar"><div id="listInfo" class="hint">Carga los integrantes para seleccionar.</div><button id="selectAllResults" class="btn outline small" type="button">Seleccionar todos los filtrados</button></div>
