@@ -197,6 +197,43 @@ function uniqueSendId(payload){
   return window.crypto.randomUUID();
  }
 }
+async function immediateDispatch(campaignId){
+ const {data:{session}}=await client.auth.getSession();
+ if(!session?.access_token)throw new Error('Tu sesión administrativa venció.');
+ const controller=new AbortController();
+ const handle=setTimeout(()=>controller.abort(),32000);
+ try{
+  const response=await fetch(URL+'/functions/v1/enviar-correos-ahora',{
+   method:'POST',
+   headers:{Authorization:'Bearer '+session.access_token,apikey:KEY,'Content-Type':'application/json'},
+   body:JSON.stringify({campana_id:campaignId}),
+   signal:controller.signal
+  });
+  const payload=await response.json().catch(()=>({}));
+  if(!response.ok||payload.error)throw new Error(payload.error||'El procesador no confirmó el envío ('+response.status+').');
+  return payload;
+ }finally{clearTimeout(handle)}
+}
+function displaySendState(state,extra=''){
+ const total=Number(state?.total||0),sent=Number(state?.enviados||0),waiting=Number(state?.pendientes||0),failed=Number(state?.fallidos||0);
+ const title=sent===total&&total>0?'Aceptado por el proveedor':sent>0?'Envío en curso':failed>0&&waiting===0?'Envío con errores':'Pendiente de confirmación';
+ $('sendReceiptTitle').textContent=title;
+ let summary=sent+' aceptado(s) por el proveedor · '+waiting+' pendiente(s)'+(failed?' · '+failed+' con error(es)':'')+'.';
+ if(sent===total&&total>0)summary+=' La aceptación no garantiza que esté en la bandeja de entrada.';
+ else if(waiting>0)summary+=' Los restantes continuarán automáticamente, respetando el cupo de 400 intentos cada 24 horas.';
+ if(extra)summary+=' '+extra;
+ $('sendReceiptText').textContent=summary;
+ $('sendReceipt').hidden=false;
+ $('checkSendStatus').hidden=total===0||sent===total&&waiting===0;
+ $('cancelActive').hidden=waiting===0;
+ return {sent,total,waiting,failed};
+}
+async function refreshLastSendStatus(){
+ if(!lastSendId)throw new Error('No hay envío reciente que consultar.');
+ const status=await call('admin_correos_estado',{p_campana:lastSendId});
+ displaySendState(status);
+ return status;
+}
 async function createCampaign(){
  const button=$('createCampaign');
  if(button.disabled)return;
@@ -209,30 +246,59 @@ async function createCampaign(){
   if(schedule){
    const dt=new Date(schedule);
    if(Number.isNaN(dt.getTime()))throw new Error('La fecha de programación no es válida.');
-   if(dt.getTime()<Date.now()-60000)throw new Error('La fecha de programación debe estar en el futuro.');
+   if(dt.getTime()<Date.now()-60000)throw new Error('La programación debe estar en el futuro.');
    schedule=dt.toISOString();
   }
-  const answer=schedule
-   ?'¿Confirmas PROGRAMAR el envío para '+new Date(schedule).toLocaleString('es-CL')+' a '+validation.correos_validos+' correos válidos?'
-   :'¿Confirmas ENVIAR a '+validation.correos_validos+' correos válidos? El sistema utilizará lotes y un máximo de 400 intentos por 24 horas.';
-  if(!window.confirm(answer+' Solo se utilizarán contactos habilitados y se respetarán sus preferencias de baja.'))return;
+  // Un destinatario: un solo toque en Enviar. Varios: confirmar la selección masiva.
+  if(Number(validation.correos_validos)>1){
+   const question=schedule
+    ?'¿Programar el envío a '+validation.correos_validos+' correos para '+new Date(schedule).toLocaleString('es-CL')+'?'
+    :'¿Enviar ahora a '+validation.correos_validos+' correos? El primero se intentará de inmediato y los restantes avanzarán en lotes con el límite diario.';
+   if(!window.confirm(question))return;
+  }
   const payload={...data,p_filtros:{integrante_ids:ids},p_programada_at:schedule};
   const id=uniqueSendId(payload);
-  busy(button,true,'Confirmando el envío…');
-  const result=await call('admin_correos_enviar',{...payload,p_solicitud_id:id},45000);
-  if(!result?.ok||!result.id)throw new Error('El servidor no devolvió confirmación de envío.');
-  try{sessionStorage.removeItem('movidasst_correos_envio_solicitud')}catch{}
-  lastSendId=result.id;
+  busy(button,true,schedule?'Programando…':'Enviando ahora…');
+  const created=await call('admin_correos_enviar',{...payload,p_solicitud_id:id},45000);
+  if(!created?.ok||!created.id)throw new Error('El servidor no confirmó la solicitud.');
+  lastSendId=created.id;
   $('sendReceipt').hidden=false;
-  $('sendReceiptTitle').textContent=schedule?'Envío programado':'Envío puesto en cola';
-  $('sendReceiptText').textContent=result.destinatarios+' destinatario(s). '+(schedule?'Se procesará a partir de la fecha elegida.':'El motor enviará por lotes cuando haya cupo.')+' El límite es de 400 intentos cada 24 horas. No se muestran campañas antiguas.';
+  $('sendReceiptTitle').textContent=schedule?'Envío programado':'Enviando al proveedor…';
+  $('sendReceiptText').textContent=schedule
+   ?'Programado para '+new Date(schedule).toLocaleString('es-CL')+'. Destinatarios: '+created.destinatarios+'.'
+   :'Solicitud creada para '+created.destinatarios+' destinatario(s). Comprobando el envío real…';
   $('cancelActive').hidden=false;
+  $('checkSendStatus').hidden=false;
   selected.clear();renderPeople();
-  banner('Envío confirmado para '+result.destinatarios+' destinatario(s). '+(result.reutilizado?'Se recuperó una solicitud anterior sin duplicarla.':'No necesitas volver a enviarlo.'));
-  try{await refreshDashboard()}catch(e){banner('El envío se guardó, pero no se pudo actualizar la cuota: '+e.message,true)}
+  try{sessionStorage.removeItem('movidasst_correos_envio_solicitud')}catch{}
+  if(schedule){
+   banner('Envío programado correctamente.');
+  }else{
+   let direct=null,extra='';
+   try{
+    direct=await immediateDispatch(created.id);
+    if(direct.skipped==='registration_emails_have_priority')extra='Los mensajes de registro tienen prioridad.';
+    if(direct.skipped==='envio_no_activo')extra='La solicitud ya no está activa.';
+    if(Number(direct.reprogrammed||0)>0)extra='El proveedor no confirmó uno de los intentos. Se reintentará sin duplicar entregas confirmadas.';
+   }catch(error){
+    extra='No pudimos confirmar el procesamiento inmediato: '+(error.message||'error')+'. La solicitud no se duplicará.';
+   }
+   try{
+    const result=await refreshLastSendStatus();
+    displaySendState(result,extra);
+    if(Number(result.enviados||0)>0)banner('El proveedor aceptó '+result.enviados+' correo(s).');
+    else if(Number(result.pendientes||0)>0)banner('Aún no hay confirmación del proveedor. Puedes pulsar «Comprobar estado».',true);
+    else banner('El envío requiere revisión. '+extra,true);
+   }catch(error){
+    $('sendReceiptTitle').textContent='Estado no disponible';
+    $('sendReceiptText').textContent='El envío fue registrado, pero no pudimos consultar su resultado: '+error.message+'. No vuelvas a crearlo; usa «Comprobar estado».';
+    banner('El envío se registró, pero todavía no es posible confirmar su resultado.',true);
+   }
+  }
+  refreshDashboard().catch(()=>{});
   $('sendReceipt').scrollIntoView({behavior:'smooth',block:'center'});
  }catch(e){
-  banner('No se pudo verificar el resultado del envío: '+(e.message||'error desconocido')+'. Si hubo un corte de conexión, puedes reintentar sin cambiar los datos: se reutilizará la misma solicitud para evitar duplicados.',true);
+  banner('No se pudo completar la solicitud: '+(e.message||'error desconocido')+'. Si hubo un corte de conexión, reintenta sin cambiar los datos para evitar duplicados.',true);
  }finally{busy(button,false)}
 }
 async function cancelCurrent(){
@@ -242,6 +308,7 @@ async function cancelCurrent(){
  try{
   const result=await call('admin_comunicacion_campana_accion',{p_id:lastSendId,p_accion:'cancelar'});
   if(result?.estado!=='cancelada')throw new Error('La cancelación no pudo confirmarse.');
+  $('checkSendStatus').hidden=true;
   $('sendReceiptTitle').textContent='Se cancelaron los mensajes pendientes';
   $('sendReceiptText').textContent='Los mensajes que ya salieron no pueden recuperarse. Los pendientes de este envío quedaron cancelados.';
   $('cancelActive').hidden=true;
@@ -311,6 +378,15 @@ function events(){
  $('testEmail').addEventListener('click',sendTest);
  $('createCampaign').addEventListener('click',createCampaign);
  $('cancelActive').addEventListener('click',cancelCurrent);
+ $('checkSendStatus').addEventListener('click',async()=>{
+  const button=$('checkSendStatus');busy(button,true,'Comprobando…');
+  try{
+   const state=await refreshLastSendStatus();
+   if(Number(state.enviados||0)>0)banner('Confirmado por el proveedor: '+state.enviados+' correo(s).');
+   else banner('El proveedor aún no confirma el envío. Pendientes: '+Number(state.pendientes||0)+'.');
+  }catch(e){banner('No se pudo comprobar: '+e.message,true)}
+  finally{busy(button,false)}
+ });
 }
 document.addEventListener('DOMContentLoaded',async()=>{
  if(!client){$('loginError').textContent='No se pudo cargar el módulo de autenticación. Verifica tu conexión.';$('loginError').hidden=false;return}
