@@ -7,7 +7,7 @@ const client=window.supabase?.createClient(URL,KEY,{auth:{persistSession:true,au
 const selected=new Set();
 const selectedStates=new Set();
 let availableStates=[];
-let people=[],page=0,total=0,limit=50,searchSerial=0,searchTimer=null,templates=[],active=false,previewChecksum='',lastSendId=null;
+let people=[],page=0,total=0,limit=50,searchSerial=0,searchTimer=null,templates=[],active=false,previewChecksum='',lastSendId=null,statusPollTimer=null,statusPollRunning=false;
 const txt=v=>String(v==null?'':v);
 const esc=s=>txt(s).replace(/[&<>"']/g,x=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[x]));
 const make=(tag,cls,value)=>{const e=document.createElement(tag);if(cls)e.className=cls;if(value!==undefined)e.textContent=txt(value);return e};
@@ -172,6 +172,8 @@ async function initialize(){
  templates=plantillas||[];templates.forEach((t,i)=>{const opt=make('option','',t.nombre);opt.value=String(i);$('templateSelect').append(opt)});
  selectedChanged();renderPreview();
  await Promise.all([loadPeople(),refreshDashboard()]);
+ await restoreLastSend().catch(()=>{});
+ startStatusWatch();
 }
 async function login(){
  $('loginError').hidden=true;
@@ -216,17 +218,41 @@ async function immediateDispatch(campaignId){
 }
 function displaySendState(state,extra=''){
  const total=Number(state?.total||0),sent=Number(state?.enviados||0),waiting=Number(state?.pendientes||0),failed=Number(state?.fallidos||0);
- const title=sent===total&&total>0?'Aceptado por el proveedor':sent>0?'Envío en curso':failed>0&&waiting===0?'Envío con errores':'Pendiente de confirmación';
+ const title=state?.estado==='cancelada'?'Envío cancelado':sent===total&&total>0?'Aceptado por el proveedor':state?.estado==='programada'&&sent===0?'Envío programado':sent>0?'Envío en curso':failed>0&&waiting===0?'Envío con errores':'Enviando progresivamente';
  $('sendReceiptTitle').textContent=title;
- let summary=sent+' aceptado(s) por el proveedor · '+waiting+' pendiente(s)'+(failed?' · '+failed+' con error(es)':'')+'.';
+ let summary=sent+' de '+total+' aceptados por el proveedor ('+(total?Math.round(sent*100/total):0)+' %) · '+waiting+' pendientes'+(failed?' · '+failed+' con error(es)':'')+'.';
  if(sent===total&&total>0)summary+=' La aceptación no garantiza que esté en la bandeja de entrada.';
- else if(waiting>0)summary+=' Los restantes continuarán automáticamente, respetando el cupo de 400 intentos cada 24 horas.';
+ else if(waiting>0)summary+=' Se están despachando en lotes de hasta 10 correos cada minuto, con un máximo de 400 intentos por 24 horas. La cifra se actualiza automáticamente.';
  if(extra)summary+=' '+extra;
  $('sendReceiptText').textContent=summary;
  $('sendReceipt').hidden=false;
  $('checkSendStatus').hidden=total===0||sent===total&&waiting===0;
  $('cancelActive').hidden=waiting===0;
  return {sent,total,waiting,failed};
+}
+
+async function restoreLastSend(){
+ const latest=await call('admin_correos_ultimo_envio',{},13000);
+ if(latest?.id&&latest?.resumen){
+  lastSendId=latest.id;
+  displaySendState(latest.resumen);
+ }
+}
+function startStatusWatch(){
+ if(statusPollTimer!==null)clearInterval(statusPollTimer);
+ statusPollTimer=setInterval(async()=>{
+  if(!active||document.hidden||!lastSendId||statusPollRunning)return;
+  statusPollRunning=true;
+  try{
+   const summary=await refreshLastSendStatus();
+   if(Number(summary?.pendientes||0)>0)await refreshDashboard();
+  }catch{
+   // No interrumpir al administrador ante una falla temporal de red.
+   // El botón "Comprobar estado" sigue disponible.
+  }finally{
+   statusPollRunning=false;
+  }
+ },25000);
 }
 async function refreshLastSendStatus(){
  if(!lastSendId)throw new Error('No hay envío reciente que consultar.');
