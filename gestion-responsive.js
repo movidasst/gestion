@@ -12,7 +12,7 @@
     ['correos', 'Correos', 'fa-envelope']
   ];
   const sources = new Map(Array.from(original.querySelectorAll('button.module-tab[data-module]')).map(btn => [btn.dataset.module,btn]));
-  if (modules.some(([id]) => !sources.has(id))) return;
+  if (modules.some(([id]) => id !== 'correos' && !sources.has(id))) return;
   const nav = document.createElement('nav');
   nav.className = 'gestion-mobile-nav';
   nav.setAttribute('aria-label', 'Módulos de Gestión SST');
