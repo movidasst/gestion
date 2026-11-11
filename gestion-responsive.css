@@ -64,7 +64,7 @@
  #appView.gestion-ui-ready .academy-view-tab{flex:none}
  #appView.gestion-ui-ready .gestion-mobile-nav{
    display:grid;position:fixed;left:0;right:0;bottom:0;z-index:85;
-   grid-template-columns:repeat(4,minmax(0,1fr));gap:0;
+   grid-template-columns:repeat(5,minmax(0,1fr));gap:0;
    min-height:var(--gestion-dock-h);padding:5px max(5px,env(safe-area-inset-left,0px))
      calc(5px + env(safe-area-inset-bottom,0px)) max(5px,env(safe-area-inset-right,0px));
    background:#fff;border-top:1px solid #dce8ec;
@@ -75,7 +75,7 @@
    position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;
    gap:3px;min-width:0;min-height:57px;border:0;border-radius:12px;
    background:transparent;color:#627888;font:800 .63rem/1.12 Outfit,system-ui,sans-serif;
-   padding:5px 2px;cursor:pointer;-webkit-tap-highlight-color:transparent
+   padding:5px 2px;cursor:pointer;text-decoration:none;-webkit-tap-highlight-color:transparent
  }
  #appView.gestion-ui-ready .gestion-dock-btn i{font-size:1.12rem;line-height:1.2}
  #appView.gestion-ui-ready .gestion-dock-btn span.gestion-nav-label{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
