@@ -299,7 +299,7 @@ async function createCampaign(){
   $('sendReceipt').scrollIntoView({behavior:'smooth',block:'center'});
  }catch(e){
   banner('No se pudo completar la solicitud: '+(e.message||'error desconocido')+'. Si hubo un corte de conexión, reintenta sin cambiar los datos para evitar duplicados.',true);
- }finally{busy(button,false)}
+ }finally{busy(button,false);button.disabled=selected.size===0}
 }
 async function cancelCurrent(){
  if(!lastSendId)return;
